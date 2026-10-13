@@ -1,0 +1,7 @@
+node_modules/
+.local/
+test-results/
+playwright-report/
+*.key
+*.age
+.DS_Store

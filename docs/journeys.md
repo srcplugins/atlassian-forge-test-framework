@@ -1,0 +1,68 @@
+# Writing journeys
+
+A journey creates what it needs in a marked fixture space, exercises the deployed app in Chrome, checks the result with independent Jira reads, then deletes exactly what it created.
+
+```js
+import { test, expect, projectPage } from '@srcplugins/atlassian-forge-test-framework/jira';
+
+test.use({ fixtureApp: 'my-app' });
+
+test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
+  const issue = await owned.issue('Synthetic target');
+  await projectPage(page, 'my-app', owned.project.key);
+  // ...exercise the app, then assert facts read independently through owned.api
+  expect((await owned.api(`/issue/${issue.id}?fields=summary`)).fields.summary).toBe(
+    issue.expected.summary,
+  );
+});
+```
+
+## The `owned` fixture
+
+`owned` opens a journaled run in the fixture app's space, then cleans it up after the test. Cleanup still runs when assertions fail.
+
+| Member | Use |
+|---|---|
+| `issue(summary, labels?)` | A label-marked disposable work item |
+| `propertyIssue(summary, body, typeId)` | A work item of a chosen work type, marked by a work item property instead of a label |
+| `api`, `project`, `user`, `run` | The Jira client, the fixture space, the account and the journal |
+
+## Rules the journal enforces
+
+- **Locks.** One run per fixture space at a time; a suite also holds the site lease ([CI](ci.md#one-run-at-a-time)).
+- **Markers.** Everything a run writes carries the namespace: labels and properties use `markers.runMarker`, and a resource your own runner creates should use `markers.acceptance(name, detail)`, so two apps on one site never mistake each other's fixtures.
+- **Unresolved runs.** An unresolved earlier run on the same space stops a new one; recover it with `forge-test cleanup`.
+- **Intent before writes.** Intent is recorded before every create. A failed create is reconciled by reading, never by repeating the request. Cleanup removes a work item found that way only while it is still as created: its run marker, summary and description match, this run's account reported it, it has the requested type, and nothing was added to it.
+- **Cleanup checks.** Cleanup rechecks the space marker, then each resource's identity, markers and fields, and confirms each deletion independently.
+
+  It refuses resources that have gained dependents (subtasks, links, attachments, work logs, comments). A refusal leaves the journal as `cleanup-required` for inspection.
+
+## Profiles
+
+`standard` uses the fixture app's space and `identity` uses the pinned identity space. Register others in `forge-test.mjs`:
+
+```js
+registerProfile('tenant-isolation', {
+  project: () => 'ISO',
+  marker: () => markers.browserProject('tenant-isolation'),
+  allow: ({ app, host }) => {
+    if (process.env.MY_ISOLATION_TESTS !== '1') throw Error('Explicit opt-in required');
+  },
+  missing: 'Marked ISO space required.',
+});
+```
+
+Recovery always uses the profile saved in the journal.
+
+## Other helpers
+
+| Helper | Use |
+|---|---|
+| `installation(app)` | The installation under test, with app and environment IDs |
+| `projectPage(page, app, key)` | Opens the app's space page |
+| `panel(page, app, key, label)` | Opens the app's work item panel |
+| `observeAction(page, action, exercise, target, projectId?)` | Waits for one resolver response for an exact installation and returns its value |
+| `themeTest` | Journals the account's theme, lets the test change it, then restores it. The menu opens from `/jira/your-work`; `test.use({ themePage: '/browse/KEY-1' })` picks another page |
+| `textContrast(locator)` | Asserts a 4.5:1 contrast ratio |
+| `openRovoChat`, `askRovo` (from `./browser`) | Selects one Rovo agent unambiguously and asks it something. Jira facts, not agent prose, prove results |
+| `dismissOnboarding(page)` | Completes Jira's first-run dialog whenever it appears |

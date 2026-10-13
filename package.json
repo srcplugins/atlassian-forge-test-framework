@@ -1,0 +1,48 @@
+{
+  "name": "@srcplugins/atlassian-forge-test-framework",
+  "version": "0.2.2",
+  "private": true,
+  "description": "Hosted acceptance testing for Atlassian Forge apps on owned sites: journaled disposable fixtures, guarded cleanup, Playwright lanes and Jira helpers.",
+  "license": "SEE LICENSE IN LICENSE.md",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "bin": {
+    "forge-test": "bin/forge-test.mjs"
+  },
+  "exports": {
+    "./core": "./src/core/index.mjs",
+    "./browser": "./src/core/browser.mjs",
+    "./jira": "./src/jira/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "docs",
+    "LICENSE.md",
+    "README.md"
+  ],
+  "scripts": {
+    "format:check": "prettier --check \"**/*.{js,mjs,json,yml,yaml}\"",
+    "format:write": "prettier --write \"**/*.{js,mjs,json,yml,yaml}\"",
+    "lint": "eslint . --max-warnings=0",
+    "knip": "knip --no-progress",
+    "test": "node --test tests/*.test.mjs",
+    "check": "npm run format:check && npm run lint && npm run knip && npm test"
+  },
+  "peerDependencies": {
+    "@playwright/test": "1.63.0"
+  },
+  "devDependencies": {
+    "@eslint-community/eslint-plugin-eslint-comments": "4.8.1",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "eslint": "10.11.0",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.12.0",
+    "knip": "6.41.0",
+    "prettier": "3.9.9"
+  }
+}
