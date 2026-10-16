@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
@@ -23,7 +30,7 @@ import { runSuite } from '../core/suite.mjs';
  * Runs a suite while holding the site lease, so suites from other repositories or machines on
  * the same site wait. The lease is renewed on a timer and confirmed again right before each
  * step; a failed renewal retries on the next tick, and a lost lease stops the suite before its
- * next step.
+ * next step or cleanup.
  */
 export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
   const { GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: run } = process.env;
@@ -44,6 +51,7 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
         await renew();
         if (lost) throw lost;
       },
+      fixturesClean: () => fixturesClean(),
     });
   } finally {
     clearInterval(timer);
@@ -53,6 +61,14 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
       .release()
       .catch(() => console.error('Could not release the site lease; it expires on its own.'));
   }
+}
+
+/** Whether every fixture journal on the site under test is clean (none active or left over). */
+export function fixturesClean(directory = activeTarget().runs) {
+  if (!existsSync(directory)) return true;
+  return readdirSync(directory)
+    .filter((name) => /^[0-9a-f-]{36}\.json$/.test(name))
+    .every((name) => JSON.parse(readFileSync(`${directory}/${name}`, 'utf8')).status === 'clean');
 }
 
 /** Read-only check of the configured account on the API site. */

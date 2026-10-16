@@ -48,13 +48,23 @@ export const test = base.extend({
       const choices = page.getByRole('menuitemradio');
       if (!(await choices.first().isVisible()))
         await page.getByRole('button', { name: 'Theme', exact: true }).click();
-      await expect(choices).toHaveCount(3);
+      await expect(choices).toHaveCount(3, { timeout: 5000 });
       return choices;
+    }
+    // Theme is a flyout that can close between two steps on a slower host (GitHub's runners),
+    // so each step that needs a choice reopens the menu until it can act on it.
+    async function onChoice(item, act) {
+      await expect(async () => {
+        await menu();
+        await act(item);
+      }).toPass({ timeout: 30000, intervals: [500, 1000, 2000] });
     }
     async function set(name) {
       if (!['Light', 'Dark', 'Match browser'].includes(name)) throw Error('Unsupported theme');
-      await menu();
-      await page.getByRole('menuitemradio', { name, exact: true }).click();
+      // Choosing the same theme twice is harmless, so a click lost to a closing flyout repeats.
+      await onChoice(page.getByRole('menuitemradio', { name, exact: true }), (item) =>
+        item.click({ timeout: 3000 }),
+      );
       if (name !== 'Match browser')
         await expect(page.locator('html')).toHaveAttribute('data-color-mode', name.toLowerCase());
       await page.keyboard.press('Escape');
@@ -62,10 +72,12 @@ export const test = base.extend({
     }
     try {
       await open();
-      await menu();
       const selected = page.getByRole('menuitemradio', { checked: true });
-      await expect(selected).toHaveCount(1);
-      const original = (await selected.innerText()).trim();
+      let original;
+      await onChoice(selected, async (item) => {
+        await expect(item).toHaveCount(1, { timeout: 3000 });
+        original = (await item.innerText({ timeout: 3000 })).trim();
+      });
       expect(['Light', 'Dark', 'Match browser']).toContain(original);
       receipt = {
         site: activeTarget().site,
@@ -83,10 +95,10 @@ export const test = base.extend({
         await page.setViewportSize(viewport);
         await open();
         await set(receipt.original);
-        await menu();
-        await expect(
+        await onChoice(
           page.getByRole('menuitemradio', { name: receipt.original, exact: true }),
-        ).toHaveAttribute('aria-checked', 'true');
+          (item) => expect(item).toHaveAttribute('aria-checked', 'true', { timeout: 3000 }),
+        );
         receipt.status = 'restored';
         save();
         await page.keyboard.press('Escape');

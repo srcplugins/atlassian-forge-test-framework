@@ -32,4 +32,4 @@ export {
 export { FixtureRun } from './run-journal.mjs';
 export { lanes, selectedLanes, laneProject, definePlaywrightConfig } from './lanes.mjs';
 export { installOptions, installedOn, installArguments } from './forge-install.mjs';
-export { listSuite, runSuite } from './suite.mjs';
+export { listSuite, runSuite, selectSteps } from './suite.mjs';

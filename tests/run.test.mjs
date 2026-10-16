@@ -27,6 +27,7 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
     posts: [],
     denied: null,
     comments: [], // Comments on every fixture issue.
+    changelogs: new Map(), // Issue ID to its history entries.
   };
   let deletes = 0;
   let nextId = 888;
@@ -48,6 +49,8 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
       else if (path.includes('/project/')) body = data.project;
       else if (path.endsWith('/comment'))
         body = { comments: data.comments, total: data.comments.length };
+      else if (path.endsWith('/changelog'))
+        body = { values: data.changelogs.get(id) ?? [], isLast: true };
       else if (path.endsWith('/search/jql'))
         body = { issues: [...data.issues.values()], isLast: true };
       else if (path.includes('/properties/')) {
@@ -245,6 +248,52 @@ test('recovery refuses a live lock owner and resumes an interrupted dead owner',
       directory,
       recover: f.run.state.runId,
     });
+    await resumed.cleanup();
+    assert.equal(t.deletes, 1);
+    assert.equal(resumed.run.state.status, 'clean');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an unrecorded custom field value is cleaned up only when the run alone changed the issue', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  const changed = (accountId, at) => [
+    { author: { accountId }, created: new Date(at).toISOString(), items: [] },
+  ];
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    await f.issue('synthetic');
+    const entry = f.run.state.resources[0];
+    entry.expected.customField = { id: 'customfield_1', value: ['SBOX-1'] };
+    f.run.persist();
+    // The save landed, but its test stopped before recording the cleared value.
+    t.data.issue.fields.customfield_1 = null;
+    const started = Date.parse(f.run.state.started);
+    for (const history of [
+      [],
+      changed('someone-else', started + 1),
+      changed('test-owner', started - 60000),
+    ]) {
+      t.data.changelogs.set(entry.id, history);
+      await assert.rejects(() => f.cleanup(), /incomplete/);
+    }
+    assert.equal(t.deletes, 0);
+    // A recovered run counts only changes made before it finished.
+    const recover = () => {
+      writeFileSync(
+        join(directory, '777.lock'),
+        JSON.stringify({ runId: f.run.state.runId, pid: 2147483647 }),
+      );
+      return openRun(t.request, 'forge-sandbox', { directory, recover: f.run.state.runId });
+    };
+    const finished = Date.parse(f.run.state.finished);
+    t.data.changelogs.set(entry.id, changed('test-owner', finished + 60000));
+    await assert.rejects(async () => (await recover()).cleanup(), /incomplete/);
+    assert.equal(t.deletes, 0);
+    t.data.changelogs.set(entry.id, changed('test-owner', started + 1));
+    const resumed = await recover();
     await resumed.cleanup();
     assert.equal(t.deletes, 1);
     assert.equal(resumed.run.state.status, 'clean');
@@ -470,4 +519,47 @@ test('peer tenant API cannot mutate even if a caller passes a write method', asy
       /Peer tenant API is read-only/,
     );
   assert.throws(() => client({}, 'https://unowned.example'), /Owned Jira API site required/);
+});
+
+test('a profile that declares a team-managed project accepts only that style', async () => {
+  registerProfile('team-managed', {
+    project: () => 'TEAM',
+    marker: () => markers.browserProject('team-managed'),
+    allow: () => {},
+    missing: 'Marked team-managed fixture required.',
+    style: 'next-gen',
+  });
+  assert.throws(
+    () =>
+      registerProfile('odd', {
+        project: () => 'X',
+        marker: () => 'x',
+        allow: () => {},
+        missing: 'x',
+        style: 'simplified',
+      }),
+    /classic or next-gen/,
+  );
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport({ key: 'TEAM', description: markers.browserProject('team-managed') });
+  try {
+    // The company-managed project a team-managed profile names is refused, and the reverse.
+    await assert.rejects(
+      () => openRun(t.request, 'forge-sandbox', { directory, profile: 'team-managed' }),
+      /Marked team-managed fixture required/,
+    );
+    t.data.project.style = 'next-gen';
+    const f = await openRun(t.request, 'forge-sandbox', { directory, profile: 'team-managed' });
+    await f.issue('synthetic');
+    await f.cleanup();
+    assert.equal(f.run.state.status, 'clean');
+    t.data.project.description = markers.browserProject('forge-sandbox');
+    t.data.project.key = 'SBOX';
+    await assert.rejects(
+      () => openRun(t.request, 'forge-sandbox', { directory }),
+      /Owned isolated fixture project required/,
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

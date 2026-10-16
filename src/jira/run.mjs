@@ -20,10 +20,11 @@ import { activeTarget } from '../core/target.mjs';
 const same = (a, b) => assert.deepEqual(a, b);
 
 // Fixture profiles select the owned project a run writes to. `standard` is the fixture app's own
-// project and `identity` the pinned identity project. A consumer registers further profiles
-// (registerProfile) before opening or recovering such a run: { project(app) -> key,
-// marker(app) -> project description marker, allow({ app, host }) throws when not allowed,
-// missing: message when the marked project is absent }.
+// project and `identity` the pinned identity project, both company-managed. A consumer registers
+// further profiles (registerProfile) before opening or recovering such a run: { project(app) ->
+// key, marker(app) -> project description marker, allow({ app, host }) throws when not allowed,
+// missing: message when the marked project is absent, style?: 'classic' (default) or 'next-gen'
+// for a team-managed project }.
 const profiles = new Map();
 export function registerProfile(name, definition) {
   if (!/^[a-z][a-z0-9-]*$/.test(name) || ['standard', 'identity'].includes(name))
@@ -33,6 +34,8 @@ export function registerProfile(name, definition) {
     typeof definition.missing !== 'string'
   )
     throw Error('Fixture profile needs project, marker, allow and missing');
+  if (definition.style !== undefined && !['classic', 'next-gen'].includes(definition.style))
+    throw Error('Fixture profile style must be classic or next-gen');
   profiles.set(name, definition);
 }
 const known = (profile) => ['standard', 'identity'].includes(profile) || profiles.has(profile);
@@ -67,7 +70,7 @@ export async function openRun(
   if (
     !isMarker(project?.description, marker) ||
     project.key !== projectKey ||
-    project.style !== 'classic' ||
+    project.style !== (extension?.style ?? 'classic') ||
     project.projectTypeKey !== 'software'
   )
     throw Error(extension?.missing ?? 'Owned isolated fixture project required. Run prepare.');
@@ -133,6 +136,23 @@ export async function openRun(
       api(
         `/issue/${id}?fields=summary,labels,description,project,issuetype,subtasks,attachment,issuelinks,status,assignee,reporter,priority,versions,fixVersions,components,duedate,timetracking,worklog&properties=${markerForms(markers.fixtureProperty).join(',')}`,
       );
+    // Jira's history shows changes to the issue, all by this run's account and during the run:
+    // from its start to now, or for a recovered run, to when that run finished.
+    const changedOnlyByRun = async (id) => {
+      const history = await api(`/issue/${id}/changelog?maxResults=100`);
+      const from = Date.parse(run.state.started);
+      const to = recover ? Date.parse(run.state.finished) : Date.now();
+      return (
+        history?.isLast === true &&
+        history.values.length > 0 &&
+        history.values.every(
+          (change) =>
+            change.author?.accountId === run.state.actor &&
+            Date.parse(change.created) >= from &&
+            Date.parse(change.created) <= to,
+        )
+      );
+    };
     const verifyIssue = async (entry, value) => {
       await verifyProject();
       const x = value ?? (await issueRead(entry.id));
@@ -162,7 +182,13 @@ export async function openRun(
       } else same(x.fields.description, entry.expected.description);
       if (entry.expected.customField) {
         const field = entry.expected.customField;
-        same((await api(`/issue/${entry.id}?fields=${field.id}`)).fields[field.id], field.value);
+        try {
+          same((await api(`/issue/${entry.id}?fields=${field.id}`)).fields[field.id], field.value);
+        } catch (error) {
+          // A save can land after its test stopped and before it recorded the new value. The
+          // field is still the run's own while nothing but this run's account changed the issue.
+          if (!(await changedOnlyByRun(entry.id))) throw error;
+        }
       }
       if (x.fields.subtasks?.length || x.fields.attachment?.length || x.fields.issuelinks?.length)
         throw Error('Issue acquired external dependents');

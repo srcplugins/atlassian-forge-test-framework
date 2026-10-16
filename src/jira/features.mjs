@@ -5,9 +5,11 @@ import { openRun } from './run.mjs';
 import { site, tokenRequest, client } from './client.mjs';
 
 // Playwright fixtures for disposable-fixture journeys. A suite selects its fixture app with
-// test.use({ fixtureApp }); `owned` opens a journaled run and always cleans it up.
+// test.use({ fixtureApp }), and a registered profile with test.use({ fixtureProfile }); `owned`
+// opens a journaled run and always cleans it up.
 export const test = base.extend({
   fixtureApp: [undefined, { option: true }],
+  fixtureProfile: ['standard', { option: true }],
   jiraRequest: async ({}, use) => {
     const request = await tokenRequest();
     try {
@@ -16,12 +18,12 @@ export const test = base.extend({
       await request.dispose();
     }
   },
-  owned: async ({ context, page, fixtureApp, jiraRequest }, use, info) => {
+  owned: async ({ context, page, fixtureApp, fixtureProfile, jiraRequest }, use, info) => {
     if (!fixtureApp) throw Error('Select the fixture app with test.use({ fixtureApp }).');
     expect((await client(context.request)('/myself')).accountId).toBe(
       (await client(jiraRequest)('/myself')).accountId,
     );
-    const owned = await openRun(jiraRequest, fixtureApp);
+    const owned = await openRun(jiraRequest, fixtureApp, { profile: fixtureProfile });
     owned.run.state.test = info.title;
     owned.run.persist();
     const started = Date.now();

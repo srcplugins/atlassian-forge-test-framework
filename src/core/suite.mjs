@@ -1,9 +1,15 @@
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
-// A hosted suite is an ordered list of steps: { name, command: [executable, ...args], env }.
-// It stops at the first failure so a failed run's journals and evidence stay for inspection, and
-// never retries. The summary carries step names and timings only, never output.
+// A hosted suite is an ordered list of steps:
+// { name, command: [executable, ...args], env, prerequisite, cleanup }.
+// Each step gets its own run ID in FORGE_TEST_RUN_ID, which a runner uses for its journal. A
+// failed prerequisite stops the suite. Any other failed step is settled before the suite moves
+// on: `cleanup: [executable, ...args]` runs that guarded cleanup with the run ID appended, and
+// `cleanup: 'fixtures'` requires every fixture journal to be clean. A step that can't be settled,
+// or declares no cleanup, stops the suite, so its journals and evidence stay for inspection.
+// Nothing is retried. The summary carries step names and timings only, never output.
 
 /** Prints the steps without running them. */
 export function listSuite(steps, log = console.log) {
@@ -15,6 +21,23 @@ export function listSuite(steps, log = console.log) {
     );
 }
 
+/**
+ * The prerequisites plus the steps whose names contain one of the comma-separated terms (case
+ * ignored). A term that selects nothing is refused, so a typo can't pass as a short green run.
+ */
+export function selectSteps(steps, only) {
+  if (!only) return steps;
+  const terms = only
+    .split(',')
+    .map((term) => term.trim().toLowerCase())
+    .filter(Boolean);
+  if (!terms.length) throw Error('--only needs at least one step name');
+  const matches = (s, term) => !s.prerequisite && s.name.toLowerCase().includes(term);
+  for (const term of terms)
+    if (!steps.some((s) => matches(s, term))) throw Error(`No step matches "${term}"`);
+  return steps.filter((s) => s.prerequisite || terms.some((term) => matches(s, term)));
+}
+
 const exitCode = (command, args, options) =>
   new Promise((done) => {
     const child = spawn(command, args, { ...options, stdio: 'inherit' });
@@ -23,37 +46,61 @@ const exitCode = (command, args, options) =>
   });
 
 /**
- * Runs the steps in order and resolves whether all passed. `before` runs ahead of each step; if
- * it throws, the suite stops there (for example when the site lease was lost).
+ * Runs the steps in order and resolves whether all passed. `before` runs ahead of each step and
+ * each cleanup; if it throws, the suite stops there (for example when the site lease was lost).
+ * `fixturesClean` answers whether every fixture journal is clean.
  */
 export async function runSuite(
   title,
   steps,
-  { cwd = process.cwd(), env = process.env, before = () => {} } = {},
+  {
+    cwd = process.cwd(),
+    env = process.env,
+    before = () => {},
+    fixturesClean = () => false,
+    runId = randomUUID,
+  } = {},
 ) {
   const results = [];
-  for (const s of steps) {
+  const guarded = async (label) => {
     try {
-      await before(s);
+      await before();
+      return true;
     } catch (error) {
-      console.error(`Stopped before ${s.name}: ${error.message}`);
-      break;
+      console.error(`Stopped before ${label}: ${error.message}`);
+      return false;
     }
+  };
+  for (const s of steps) {
+    if (!(await guarded(s.name))) break;
     console.log(`\n=== ${s.name}`);
+    const id = runId();
+    const stepEnv = { ...env, ...s.env, FORGE_TEST_RUN_ID: id };
     const started = performance.now();
-    const code = await exitCode(s.command[0], s.command.slice(1), {
-      cwd,
-      env: { ...env, ...s.env },
-    });
-    results.push({ ok: code === 0, seconds: (performance.now() - started) / 1000 });
-    if (code !== 0) break;
+    const code = await exitCode(s.command[0], s.command.slice(1), { cwd, env: stepEnv });
+    const result = { ok: code === 0, seconds: (performance.now() - started) / 1000 };
+    results.push(result);
+    if (result.ok) continue;
+    if (s.prerequisite || !s.cleanup) break;
+    if (s.cleanup === 'fixtures') {
+      result.settled = await fixturesClean();
+      if (!result.settled) console.error(`A fixture journal is not clean after ${s.name}.`);
+    } else {
+      if (!(await guarded(`the cleanup of ${s.name}`))) break;
+      console.log(`\n=== Cleanup after ${s.name}`);
+      const [command, ...args] = s.cleanup;
+      result.settled = (await exitCode(command, [...args, id], { cwd, env: stepEnv })) === 0;
+    }
+    if (!result.settled) break;
   }
+  const outcome = (r) =>
+    !r ? 'not run' : r.ok ? 'passed' : r.settled ? '**failed**, cleaned up' : '**failed**';
   const lines = [
     `| ${title} | Result | Minutes |`,
     '|---|---|---|',
     ...steps.map((s, i) => {
       const r = results[i];
-      return `| ${s.name} | ${r ? (r.ok ? 'passed' : '**failed**') : 'not run'} | ${r ? (r.seconds / 60).toFixed(1) : ''} |`;
+      return `| ${s.name} | ${outcome(r)} | ${r ? (r.seconds / 60).toFixed(1) : ''} |`;
     }),
   ];
   console.log(`\n${lines.join('\n')}`);

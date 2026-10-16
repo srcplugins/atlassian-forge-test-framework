@@ -15,7 +15,7 @@ Jira is supported today. The shared parts are in `core`, so another Atlassian pr
 Install it from GitHub at a release tag:
 
 ```sh
-npm install --save-dev github:srcplugins/atlassian-forge-test-framework#v0.2.2 @playwright/test@1.63.0
+npm install --save-dev github:srcplugins/atlassian-forge-test-framework#v0.3.0 @playwright/test@1.63.0
 ```
 
 It needs Node 24 and Google Chrome.

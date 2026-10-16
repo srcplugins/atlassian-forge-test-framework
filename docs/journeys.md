@@ -33,13 +33,13 @@ test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
 - **Markers.** Everything a run writes carries the namespace: labels and properties use `markers.runMarker`, and a resource your own runner creates should use `markers.acceptance(name, detail)`, so two apps on one site never mistake each other's fixtures.
 - **Unresolved runs.** An unresolved earlier run on the same space stops a new one; recover it with `forge-test cleanup`.
 - **Intent before writes.** Intent is recorded before every create. A failed create is reconciled by reading, never by repeating the request. Cleanup removes a work item found that way only while it is still as created: its run marker, summary and description match, this run's account reported it, it has the requested type, and nothing was added to it.
-- **Cleanup checks.** Cleanup rechecks the space marker, then each resource's identity, markers and fields, and confirms each deletion independently.
+- **Cleanup checks.** Cleanup rechecks the space marker, then each resource's identity, markers and fields, and confirms each deletion independently. A custom field that differs from the journal, such as a save that landed after its test stopped, passes only when Jira's history shows that every change to the work item was made by the run's account during the run.
 
   It refuses resources that have gained dependents (subtasks, links, attachments, work logs, comments). A refusal leaves the journal as `cleanup-required` for inspection.
 
 ## Profiles
 
-`standard` uses the fixture app's space and `identity` uses the pinned identity space. Register others in `forge-test.mjs`:
+`standard` uses the fixture app's space and `identity` uses the pinned identity space; both are company-managed. Register others in `forge-test.mjs`:
 
 ```js
 registerProfile('tenant-isolation', {
@@ -51,6 +51,8 @@ registerProfile('tenant-isolation', {
   missing: 'Marked ISO space required.',
 });
 ```
+
+A profile for a team-managed space adds `style: 'next-gen'`; a run then refuses the space unless Jira reports that style, as it refuses a non-company-managed space otherwise. `prepare` creates only company-managed spaces, so a repository creates its team-managed space with its own journaled runner. A suite selects a profile for the `owned` fixture with `test.use({ fixtureProfile: 'name' })`.
 
 Recovery always uses the profile saved in the journal.
 

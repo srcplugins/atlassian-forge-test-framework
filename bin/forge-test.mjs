@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { installArguments, installOptions, installedOn } from '../src/core/forge-install.mjs';
-import { listSuite } from '../src/core/suite.mjs';
+import { listSuite, selectSteps } from '../src/core/suite.mjs';
 import {
   cleanup,
   doctor,
@@ -28,7 +28,8 @@ const usage = `Usage: forge-test <command>
   prepare                        Create or verify the marked fixture projects
   cleanup <fixture-app> <run>    Guarded cleanup of one journaled run
   lane <lane> [--config f] [-- args]  Run a Playwright lane (features, compatibility)
-  suite <name> [--list]          Run a suite from forge-test.mjs, stopping at the first failure
+  suite <name> [--only a,b] [--list]  Run a suite from forge-test.mjs (--only: its prerequisites
+                                 and the steps whose names contain a term)
   install [--role r] [-e env]    Install or upgrade the app through the module's Forge command
   secrets --repo o/r --env e [--profiles a,b] [--dry-run]   Copy state into GitHub secrets
   restore                        Write sessions from CI secrets into the private state layout
@@ -71,11 +72,13 @@ try {
     }
     case 'suite': {
       const { suites = {} } = await consumer();
-      const steps = suites[args[0]];
-      if (!steps)
+      if (!suites[args[0]])
         throw Error(`No suite ${args[0]}; forge-test.mjs defines: ${Object.keys(suites)}`);
+      const only = option(args, '--only');
+      const steps = selectSteps(suites[args[0]], only);
+      const title = `${args[0]} suite${only ? ` (only ${only})` : ''}`;
       if (args.includes('--list')) listSuite(steps);
-      else process.exitCode = (await suite(`${args[0]} suite`, steps)) ? 0 : 1;
+      else process.exitCode = (await suite(title, steps)) ? 0 : 1;
       break;
     }
     case 'install': {

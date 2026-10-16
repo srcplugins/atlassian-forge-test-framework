@@ -5,12 +5,17 @@ import { expect } from '@playwright/test';
 export async function openRovoChat(page, { url, agent, starter, inventory }) {
   const gallery = async () => {
     await page.goto(url, { waitUntil: 'domcontentloaded' });
-    // Jira remembers an open chat panel across page loads; opening it again would close it.
+    // Jira remembers an open chat panel across page loads and restores it after the top bar
+    // renders, sometimes seconds later; opening it again would close it. Give the panel time
+    // to appear, then open it until its menu shows (a click that closed a late panel reopens it).
     const menu = page.getByRole('button', { name: 'Menu', exact: true });
     const open = page.getByRole('button', { name: 'Open Rovo Chat', exact: true });
     await expect(menu.or(open).first()).toBeVisible({ timeout: 45000 });
-    if (!(await menu.isVisible())) await open.click();
-    await expect(menu).toBeVisible({ timeout: 45000 });
+    await menu.waitFor({ timeout: 10000 }).catch(() => {});
+    await expect(async () => {
+      if (!(await menu.isVisible())) await open.click({ timeout: 5000 });
+      await expect(menu).toBeVisible({ timeout: 10000 });
+    }).toPass({ timeout: 60000, intervals: [1000, 3000] });
     await menu.click();
     await page.getByText('View all agents', { exact: true }).click();
     await page.getByRole('searchbox', { name: 'Search agents', exact: true }).fill(agent);
