@@ -52,7 +52,7 @@ test('site audit fails closed for unknown sites, transport failure and canonical
     throw Error('Authorization: secret');
   };
   await assert.rejects(
-    sitePreflight({ ...credentials, site: 'unowned.atlassian.net', fetchImpl }),
+    sitePreflight({ ...credentials, site: 'unowned-example.atlassian.net', fetchImpl }),
     /owned/,
   );
   assert.equal(calls, 0);

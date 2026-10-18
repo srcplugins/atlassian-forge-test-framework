@@ -9,7 +9,7 @@ const fixture = {
   scheme: { id: '200' },
   actors: { owner: 'owner', member: 'member', restricted: 'restricted' },
 };
-test('identity fixture rejects foreign target, unmarked project and colliding/missing identities', () => {
+test('identity fixture rejects foreign target, unmarked space and colliding/missing identities', () => {
   assert.equal(validateIdentityFixture(fixture, primary).project.id, '100');
   assert.throws(() => validateIdentityFixture(fixture, second));
   for (const change of [

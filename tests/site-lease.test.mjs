@@ -6,7 +6,7 @@ import { siteLease } from '../src/jira/site-lease.mjs';
 
 const path = '/project/AUTH/properties/acme.site-lease';
 
-// One shared Jira site: the identity project and its lease property, with a manual clock.
+// One shared Jira site: the identity space and its lease property, with a manual clock.
 function site({ description = markers.identityProject } = {}) {
   const s = { clock: 0, property: undefined, writes: 0, deletes: 0 };
   s.api = async (url, method = 'GET', data) => {
@@ -141,8 +141,8 @@ test('a lost lease is reported, and release never deletes another holder', async
   assert.equal(s.deletes, 0);
 });
 
-test('the lease is written only to a marked fixture project', async () => {
+test('the lease is written only to a marked fixture space', async () => {
   const s = site({ description: 'A customer project' });
-  await assert.rejects(() => s.lease('repo-a').acquire(), /not a marked fixture project/);
+  await assert.rejects(() => s.lease('repo-a').acquire(), /not a marked fixture space/);
   assert.equal(s.writes, 0);
 });

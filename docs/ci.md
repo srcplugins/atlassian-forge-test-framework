@@ -27,6 +27,29 @@ Also set the `OWNER_AGE_RECIPIENT` variable: the public key of an age identity o
 1. **Mask first.** Run `forge-test restore` and then `forge-test mask` before anything else prints. Hosts, environment IDs, pinned account IDs and fixture space keys (and so every work item key in those spaces) then show as `***`.
 2. **Encrypt evidence.** Reports and failure screenshots are encrypted to `OWNER_AGE_RECIPIENT` (and `AGENT_AGE_RECIPIENT`, when set) before upload. CI can't read them back; you decrypt locally with `age -d -i <your key>`.
 3. **Carry journals encrypted.** Run journals carry fixture ownership from one run to the next. Encrypt them to the same readers and the CI key's recipient (`age-keygen -y`). The next run decrypts them with `CI_AGE_KEY`, so an unresolved run makes it refuse rather than ignore leftovers. Don't carry locks; a concurrency group replaces them.
+4. **Restore only your own journals.** In a public repository, a fork pull request's workflow can upload an artifact with the same name, and the CI key's recipient is public, so anyone can encrypt an archive to it. Restore only an artifact whose run came from this repository, and check the archive's members before extracting:
+
+   ```sh
+   # REPOSITORY_ID is ${{ github.repository_id }}, set in the step's env.
+   id=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/artifacts?name=hosted-state&per_page=100" |
+     jq -r --argjson repo "$REPOSITORY_ID" '[.[].artifacts[]
+       | select((.expired | not)
+                and .workflow_run.repository_id == $repo
+                and .workflow_run.head_repository_id == $repo)]
+       | max_by(.created_at) | .id // empty')
+
+   # After downloading and decrypting it to $archive: only regular files at
+   # sites/<host>/e2e/…runs/<name>.json, which is what the save step writes.
+   listing=$(tar -tvzf "$archive")
+   members=$(tar -tzf "$archive")
+   if [ -n "$members" ] && { grep -qv '^-' <<<"$listing" || grep -qF '..' <<<"$members" ||
+     grep -qEv '^sites/[^/]+/e2e/([^/]+/)*[^/]*runs/[^/]+\.json$' <<<"$members"; }; then
+     echo "::error::Carried journals contain an unexpected entry"; exit 1
+   fi
+   tar -xzf "$archive" -C .local --no-same-owner --no-same-permissions
+   ```
+
+   Keep the checks off pipelines: with `shell: bash` (`pipefail`), `tar … | grep -q` can pass a bad entry when `grep` exits early.
 
 ## One run at a time
 

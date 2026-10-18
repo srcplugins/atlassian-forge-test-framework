@@ -27,7 +27,13 @@ export class FixtureRun {
   }
   async create(kind, expected) {
     const started = Date.now();
-    const entry = { kind, expected: structuredClone(expected), status: 'creating', id: null };
+    const entry = {
+      kind,
+      expected: structuredClone(expected),
+      status: 'creating',
+      id: null,
+      intended: new Date().toISOString(),
+    };
     this.state.resources.push(entry);
     this.persist();
     // A thrown POST leaves its intent available for reconciliation; never repeat it.
@@ -50,18 +56,31 @@ export class FixtureRun {
     this.persist();
     return entry;
   }
+  // A lost create response leaves no ID. Long enough after its intent, Jira's search shows a
+  // create that landed, so no match and no trace (the adapter's `absent`) mean it never happened.
+  async neverCreated(entry, adapter, absentAfterMs) {
+    if (!Number.isInteger(absentAfterMs) || absentAfterMs < 60_000 || !adapter.absent) return false;
+    const since = Date.parse(entry.intended ?? this.state.finished ?? '');
+    if (!Number.isFinite(since) || Date.now() - since < absentAfterMs) return false;
+    return (await adapter.absent(entry.expected)) === true;
+  }
   check(name, value = true) {
     this.state.checks.push({ name, value });
     this.persist();
   }
-  async cleanup({ concurrency = 1 } = {}) {
+  /**
+   * Deletes the run's resources, newest first. `absentAfterMs` is for recovering a finished run
+   * only: an uncertain create recorded at least that long ago, whose marker search finds nothing
+   * and whose adapter confirms no trace of it, is closed as never created.
+   */
+  async cleanup({ concurrency = 1, absentAfterMs } = {}) {
     if (
       !Number.isInteger(concurrency) ||
       concurrency < 1 ||
       concurrency > 4 ||
       (concurrency > 1 && this.state.resources.some((entry) => entry.kind !== 'issue'))
     )
-      throw Error('Concurrent cleanup is limited to four independent issue fixtures');
+      throw Error('Concurrent cleanup is limited to four independent work item fixtures');
     const started = Date.now();
     this.state.status = 'cleaning';
     this.persist();
@@ -78,6 +97,12 @@ export class FixtureRun {
         if (!adapter) throw Error('Unknown resource kind');
         if (!entry.id) {
           const matches = await adapter.find(entry.expected);
+          if (matches.length === 0 && (await this.neverCreated(entry, adapter, absentAfterMs))) {
+            entry.status = 'removed';
+            entry.reconciled = 'absent';
+            this.persist();
+            return;
+          }
           if (matches.length !== 1) throw Error('Ambiguous create; inspect before retry');
           entry.id = String(matches[0].id);
           entry.status = 'created';

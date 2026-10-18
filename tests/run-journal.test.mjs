@@ -122,7 +122,7 @@ test('failed deletion remains incomplete and setup failure still cleans earlier 
   assert.equal(s.saved.status, 'clean');
 });
 
-test('bounded independent-issue cleanup drains failures and preserves per-resource verification', async () => {
+test('bounded independent-work-item cleanup drains failures and preserves per-resource verification', async () => {
   const resources = Array.from({ length: 9 }, (_, i) => ({
     kind: 'issue',
     id: String(i + 1),
@@ -167,7 +167,53 @@ test('parallel cleanup refuses dependent kinds and unbounded concurrency before 
     save: () => {},
     adapters: {},
   });
-  await assert.rejects(run.cleanup({ concurrency: 2 }), /independent issue/);
-  await assert.rejects(run.cleanup({ concurrency: 5 }), /independent issue/);
+  await assert.rejects(run.cleanup({ concurrency: 2 }), /independent work item/);
+  await assert.rejects(run.cleanup({ concurrency: 5 }), /independent work item/);
   assert.equal(run.state.status, 'active');
+});
+
+test('a create that never landed closes only on recovery, after its wait, with no trace', async () => {
+  const minutesAgo = (n) => new Date(Date.now() - n * 60_000).toISOString();
+  const attempt = async ({ options, intended = minutesAgo(6), finished, absent, found = [] }) => {
+    const s = setup();
+    s.adapter.create = async () => {
+      throw Error('network');
+    };
+    s.adapter.find = async () => found;
+    if (absent !== undefined) s.adapter.absent = async () => absent;
+    await assert.rejects(() => s.run.create('issue', { marker: 'ours' }));
+    if (intended === null) delete s.run.state.resources[0].intended;
+    else s.run.state.resources[0].intended = intended;
+    s.run.state.finished = finished;
+    await s.run.cleanup(options).catch(() => {});
+    return s;
+  };
+  const recovery = { absentAfterMs: 300_000 };
+  for (const refused of [
+    { options: undefined, absent: true },
+    { options: { absentAfterMs: 30_000 }, absent: true },
+    { options: recovery, intended: minutesAgo(4), absent: true },
+    { options: recovery, absent: false },
+    { options: recovery },
+    { options: recovery, absent: true, found: [{ id: '1' }, { id: '2' }] },
+    { options: recovery, intended: null, absent: true },
+    { options: recovery, intended: null, finished: minutesAgo(4), absent: true },
+  ]) {
+    const s = await attempt(refused);
+    assert.equal(s.saved.status, 'cleanup-required', JSON.stringify(refused));
+    assert.equal(s.saved.resources[0].status, 'creating');
+    assert.equal(s.creates + s.deletes, 0);
+  }
+  for (const closed of [
+    { options: recovery, absent: true },
+    { options: recovery, intended: null, finished: minutesAgo(6), absent: true },
+  ]) {
+    const s = await attempt(closed);
+    assert.equal(s.saved.status, 'clean', JSON.stringify(closed));
+    assert.deepEqual(
+      { status: s.saved.resources[0].status, reconciled: s.saved.resources[0].reconciled },
+      { status: 'removed', reconciled: 'absent' },
+    );
+    assert.equal(s.creates + s.deletes, 0);
+  }
 });

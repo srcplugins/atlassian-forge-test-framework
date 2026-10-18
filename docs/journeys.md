@@ -37,11 +37,24 @@ test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
 
   It refuses resources that have gained dependents (subtasks, links, attachments, work logs, comments). A refusal leaves the journal as `cleanup-required` for inspection.
 
+## Changing a fixture
+
+A journey that changes a fixture work item records the change on its `expected` before writing, calls `owned.run.persist()`, then writes through `owned.api`. Cleanup then accepts the recorded values and still compares everything else.
+
+| `expected` field | Records |
+|---|---|
+| `descriptionVariants` | Every Description the work item may have, including the one it was created with |
+| `customField` | `{ id, value }`: the custom field's expected value |
+| `statusIds` | Every status ID the work item may be in, including the one it was created in. Statuses compare by ID only |
+
 ## Profiles
 
 `standard` uses the fixture app's space and `identity` uses the pinned identity space; both are company-managed. Register others in `forge-test.mjs`:
 
 ```js
+import { markers } from '@srcplugins/atlassian-forge-test-framework/core';
+import { registerProfile } from '@srcplugins/atlassian-forge-test-framework/jira';
+
 registerProfile('tenant-isolation', {
   project: () => 'ISO',
   marker: () => markers.browserProject('tenant-isolation'),

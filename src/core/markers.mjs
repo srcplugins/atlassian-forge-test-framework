@@ -1,7 +1,7 @@
 import { config } from './config.mjs';
 
-// Every identifier the harness persists on owned sites to mark what it owns: project
-// descriptions and names, issue labels, summaries and properties. Writes
+// Every identifier the harness persists on owned sites to mark what it owns: space
+// descriptions and names, work item labels, summaries and properties. Writes
 // use only these values. Checks that decide ownership, verification or cleanup go through
 // `isMarker` or `markerForms`, never a direct comparison. The namespace comes from the
 // configuration; legacyNamespaces are recognized (never written) so fixtures created under an
@@ -12,22 +12,22 @@ export const markers = {
   get namespace() {
     return ns();
   },
-  /** Issue property holding a property-marked fixture's run marker. */
+  /** Work item property holding a property-marked fixture's run marker. */
   get fixtureProperty() {
     return `${ns()}.fixture`;
   },
-  /** Disposable browser fixture projects. */
+  /** Disposable browser fixture spaces. */
   browserProject: (app) => `${ns()} browser fixtures v1: ${app}. Synthetic data only.`,
   browserProjectName: (app) => `${ns()} E2E ${app}`,
-  /** Per-resource run marker, used as an issue label or fixture property value. */
+  /** Per-resource run marker, used as a work item label or fixture property value. */
   runMarker: (runId, index) => `${ns()}-e2e-${runId}-${index}`,
   /**
    * A repository's own fixture marker, for resources the shared helpers don't create (for
-   * example a project a runner makes): "<namespace> acceptance <name>: <detail>".
+   * example a space a runner makes): "<namespace> acceptance <name>: <detail>".
    */
   acceptance: (name, detail) => `${ns()} acceptance ${name}: ${detail}`,
   disposableIssue: (marker) => `${ns()} disposable fixture ${marker}`,
-  /** The development project and its landing issue on each owned site. */
+  /** The development space and its landing work item on each owned site. */
   get developmentProject() {
     return `${ns()} owned synthetic development fixtures. No customer data. fixture-v1`;
   },
@@ -40,13 +40,13 @@ export const markers = {
   get setupIssueLabel() {
     return `${ns()}-setup-fixture`;
   },
-  /** The identity project and its isolated permission scheme for pinned identities. */
+  /** The identity space and its isolated permission scheme for pinned identities. */
   get identityProject() {
     return `${ns()} owned identity permission fixtures v1. Synthetic data only.`;
   },
-  /** Persistent demo projects (for example listing media). Only the description is marked. */
+  /** Persistent demo spaces (for example listing media). Only the description is marked. */
   listingProject: (slug) => `${ns()} listing demo v1: ${slug}. Synthetic data only.`,
-  /** Issue property identifying a demo issue. */
+  /** Work item property identifying a demo work item. */
   get listingProperty() {
     return `${ns()}.listing`;
   },

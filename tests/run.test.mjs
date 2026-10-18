@@ -8,7 +8,7 @@ import { openRun, registerProfile } from '../src/jira/run.mjs';
 import { client } from '../src/jira/client.mjs';
 import { legacyMarker, markers } from '../src/core/markers.mjs';
 const typedApp = 'demo-app';
-// An owned fixture project plus issues with fields, labels and properties, over fetch.
+// An owned fixture space plus work items with fields, labels and properties, over fetch.
 function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
   const data = {
     project: {
@@ -23,11 +23,11 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
       ],
     },
     issues: new Map(),
-    issue: null, // The most recently created issue.
+    issue: null, // The most recently created work item.
     posts: [],
     denied: null,
-    comments: [], // Comments on every fixture issue.
-    changelogs: new Map(), // Issue ID to its history entries.
+    comments: [], // Comments on every fixture work item.
+    changelogs: new Map(), // Work item ID to its history entries.
   };
   let deletes = 0;
   let nextId = 888;
@@ -64,6 +64,7 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
           fields: {
             ...options.data.fields,
             reporter: { accountId: 'test-owner' },
+            status: { id: '10', name: 'Prompt available' },
             subtasks: [],
             attachment: [],
             issuelinks: [],
@@ -104,7 +105,7 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
     },
   };
 }
-test('project ownership and missing cleanup permission fail before run creation', async () => {
+test('space ownership and missing cleanup permission fail before run creation', async () => {
   const t = transport();
   t.data.project.description = 'unrelated';
   await assert.rejects(() => openRun(t.request, 'forge-sandbox'), /Owned/);
@@ -116,7 +117,7 @@ test('project ownership and missing cleanup permission fail before run creation'
     /Fixture permission missing: DELETE_ISSUES/,
   );
 });
-// A create whose response is lost: Jira stored the issue, the caller saw an error.
+// A create whose response is lost: Jira stored the work item, the caller saw an error.
 const losingCreate = (t) => {
   const fetch = t.request.fetch;
   t.request.fetch = async (url, options) => {
@@ -126,7 +127,7 @@ const losingCreate = (t) => {
     return response;
   };
 };
-test('cleanup removes an issue whose create response was lost, while it is untouched', async () => {
+test('cleanup removes a work item whose create response was lost, while it is untouched', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport();
   try {
@@ -142,7 +143,51 @@ test('cleanup removes an issue whose create response was lost, while it is untou
     rmSync(directory, { recursive: true, force: true });
   }
 });
-test('a lost-response issue that someone else reported, retyped or commented on is refused', async () => {
+test('recovery closes a create that never landed only after five minutes and with no trace', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    const fetch = t.request.fetch;
+    t.request.fetch = async (url, options) => {
+      if (options?.method === 'POST' && new URL(url).pathname.endsWith('/issue'))
+        throw Error('connection reset');
+      return fetch(url, options);
+    };
+    await assert.rejects(() => f.issue('synthetic'), /Verification transport failed/);
+    t.request.fetch = fetch;
+    // The run's own cleanup can't tell a slow search from a create that never landed.
+    await assert.rejects(() => f.cleanup(), /incomplete/);
+    const recover = async () => {
+      writeFileSync(
+        join(directory, '777.lock'),
+        JSON.stringify({ runId: f.run.state.runId, pid: 2147483647 }),
+      );
+      const resumed = await openRun(t.request, 'forge-sandbox', {
+        directory,
+        recover: f.run.state.runId,
+      });
+      await resumed.cleanup().catch(() => {});
+      return JSON.parse(readFileSync(join(directory, `${f.run.state.runId}.json`), 'utf8'));
+    };
+    assert.equal((await recover()).status, 'cleanup-required', 'recorded under five minutes ago');
+    f.run.state.resources[0].intended = new Date(Date.now() - 6 * 60_000).toISOString();
+    f.run.persist();
+    // A work item with the create's summary is a trace, even without the marker.
+    const summary = f.run.state.resources[0].expected.summary;
+    t.data.issues.set('901', { id: '901', fields: { summary, labels: [] }, properties: {} });
+    assert.equal((await recover()).status, 'cleanup-required', 'a trace remains');
+    t.data.issues.delete('901');
+    const closed = await recover();
+    assert.equal(closed.status, 'clean');
+    assert.equal(closed.resources[0].reconciled, 'absent');
+    assert.equal(t.deletes, 0);
+    assert.equal(t.data.posts.length, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('a lost-response work item that someone else reported, retyped or commented on is refused', async () => {
   const changes = {
     reporter: (issue) => (issue.fields.reporter = { accountId: 'someone-else' }),
     type: (issue) => (issue.fields.issuetype = { id: '39' }),
@@ -165,13 +210,13 @@ test('a lost-response issue that someone else reported, retyped or commented on 
     }
   }
 });
-test('a project without a Task type fails before intent is recorded', async () => {
+test('a space without a Task type fails before intent is recorded', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport();
   t.data.project.issueTypes = [{ id: '39', name: 'Prompt', subtask: false }];
   try {
     const f = await openRun(t.request, 'forge-sandbox', { directory });
-    await assert.rejects(() => f.issue('synthetic'), /no Task issue type/);
+    await assert.rejects(() => f.issue('synthetic'), /no Task work type/);
     assert.equal(t.data.posts.length, 0);
     assert.equal(f.run.state.resources.length, 0);
     await f.cleanup();
@@ -180,7 +225,7 @@ test('a project without a Task type fails before intent is recorded', async () =
     rmSync(directory, { recursive: true, force: true });
   }
 });
-test('lock contention, foreign journal site and wrong issue project/marker are rejected', async () => {
+test('lock contention, foreign journal site and wrong work item space/marker are rejected', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport();
   try {
@@ -199,7 +244,7 @@ test('lock contention, foreign journal site and wrong issue project/marker are r
     assert.equal(t.deletes, 1);
     const p = join(directory, `${f.run.state.runId}.json`);
     const state = JSON.parse(readFileSync(p));
-    state.site = 'https://foreign.atlassian.net';
+    state.site = 'https://foreign-example.atlassian.net';
     writeFileSync(p, JSON.stringify(state));
     await assert.rejects(
       () => openRun(t.request, 'forge-sandbox', { directory, recover: state.runId }),
@@ -224,6 +269,33 @@ test('external dependents stop cleanup, then exact owned state can resume', asyn
     assert.equal(t.deletes, 0);
     delete t.data.issue.fields.priority;
     await f.cleanup();
+    assert.equal(f.run.state.status, 'clean');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a status change recorded before it is made passes cleanup; any other change is refused', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport({ app: typedApp, key: 'DEMO' });
+  try {
+    const f = await openRun(t.request, typedApp, { directory });
+    const prompt = await f.propertyIssue('Prompt fixture', 'Synthetic instructions', '39');
+    const issue = t.data.issues.get(prompt.id);
+    issue.fields.status = { id: '11', name: 'Prompt retired' };
+    await assert.rejects(() => f.cleanup(), /cleanup incomplete/, 'unrecorded status');
+    prompt.expected.statusIds = ['10', '11'];
+    f.run.persist();
+    issue.fields.priority = { id: 'changed' };
+    await assert.rejects(() => f.cleanup(), /cleanup incomplete/, 'another field changed');
+    delete issue.fields.priority;
+    issue.fields.status = { id: '12', name: 'Elsewhere' };
+    await assert.rejects(() => f.cleanup(), /cleanup incomplete/, 'status outside the intent');
+    assert.equal(t.deletes, 0);
+    // A renamed status keeps its ID.
+    issue.fields.status = { id: '11', name: 'Retired', self: 'https://example.test/status/11' };
+    await f.cleanup();
+    assert.equal(t.deletes, 1);
     assert.equal(f.run.state.status, 'clean');
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -256,7 +328,7 @@ test('recovery refuses a live lock owner and resumes an interrupted dead owner',
   }
 });
 
-test('an unrecorded custom field value is cleaned up only when the run alone changed the issue', async () => {
+test('an unrecorded custom field value is cleaned up only when the run alone changed the work item', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport();
   const changed = (accountId, at) => [
@@ -384,7 +456,7 @@ test('pre-rename fixtures verify and clean up; new fixtures are written with cur
   }
 });
 
-test('unrelated project and property markers are still refused', async () => {
+test('unrelated space and property markers are still refused', async () => {
   for (const description of ['unrelated', legacyMarker(markers.browserProject('other-app'))])
     await assert.rejects(
       () => openRun(transport({ description }).request, 'forge-sandbox'),
@@ -409,7 +481,7 @@ test('unrelated project and property markers are still refused', async () => {
   }
 });
 
-test("journal recovery refuses unsupported resource kinds and another run's issue marker", async () => {
+test("journal recovery refuses unsupported resource kinds and another run's work item marker", async () => {
   for (const [resource, error] of [
     [{ kind: 'version', id: '5000', status: 'removed', expected: {} }, /Invalid journal resource/],
     [
@@ -422,7 +494,19 @@ test("journal recovery refuses unsupported resource kinds and another run's issu
           expected: { marker, labels: [marker] },
         };
       },
-      /Invalid issue ownership marker/,
+      /Invalid work item ownership marker/,
+    ],
+    [
+      (runId) => {
+        const marker = markers.runMarker(runId, 0);
+        return {
+          kind: 'issue',
+          id: '5000',
+          status: 'removed',
+          expected: { marker, labels: [marker], statusIds: [10] },
+        };
+      },
+      /Invalid work item status intent/,
     ],
   ]) {
     const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
@@ -443,7 +527,7 @@ test("journal recovery refuses unsupported resource kinds and another run's issu
   }
 });
 
-test('registered profiles select their own marked project and refuse when not allowed', async () => {
+test('registered profiles select their own marked space and refuse when not allowed', async () => {
   registerProfile('tenant-isolation', {
     project: () => 'ISO',
     marker: () => markers.browserProject('tenant-isolation'),
@@ -521,7 +605,7 @@ test('peer tenant API cannot mutate even if a caller passes a write method', asy
   assert.throws(() => client({}, 'https://unowned.example'), /Owned Jira API site required/);
 });
 
-test('a profile that declares a team-managed project accepts only that style', async () => {
+test('a profile that declares a team-managed space accepts only that style', async () => {
   registerProfile('team-managed', {
     project: () => 'TEAM',
     marker: () => markers.browserProject('team-managed'),
@@ -543,7 +627,7 @@ test('a profile that declares a team-managed project accepts only that style', a
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport({ key: 'TEAM', description: markers.browserProject('team-managed') });
   try {
-    // The company-managed project a team-managed profile names is refused, and the reverse.
+    // The company-managed space a team-managed profile names is refused, and the reverse.
     await assert.rejects(
       () => openRun(t.request, 'forge-sandbox', { directory, profile: 'team-managed' }),
       /Marked team-managed fixture required/,
@@ -557,7 +641,7 @@ test('a profile that declares a team-managed project accepts only that style', a
     t.data.project.key = 'SBOX';
     await assert.rejects(
       () => openRun(t.request, 'forge-sandbox', { directory }),
-      /Owned isolated fixture project required/,
+      /Owned isolated fixture space required/,
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });

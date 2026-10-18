@@ -21,6 +21,7 @@
     "bin",
     "src",
     "docs",
+    "CHANGELOG.md",
     "LICENSE.md",
     "README.md"
   ],
@@ -29,8 +30,9 @@
     "format:write": "prettier --write \"**/*.{js,mjs,json,yml,yaml}\"",
     "lint": "eslint . --max-warnings=0",
     "knip": "knip --no-progress",
+    "public:check": "node scripts/check-public.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "npm run format:check && npm run lint && npm run knip && npm test"
+    "check": "npm run format:check && npm run lint && npm run knip && npm run public:check && npm test"
   },
   "peerDependencies": {
     "@playwright/test": "1.63.0"

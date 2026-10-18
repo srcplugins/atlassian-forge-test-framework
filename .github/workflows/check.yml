@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-24.04
+    # The self-hosted px-0 runners while the repository is private; GitHub-hosted once it is
+    # public, so code from fork pull requests never runs on them.
+    runs-on: ${{ github.event.repository.private && 'px-0' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

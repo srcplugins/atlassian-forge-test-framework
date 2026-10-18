@@ -6,7 +6,7 @@ import { activeTarget } from '../core/target.mjs';
 
 /** The Jira site under test, https://<host>. */
 export const site = () => activeTarget().site;
-/** Disposable fixture projects by fixture app (configuration fixtures.apps). */
+/** Disposable fixture spaces by fixture app (configuration fixtures.apps). */
 export const projects = () => fixtureApps();
 
 /**
@@ -38,7 +38,7 @@ export function client(request, targetSite = site()) {
       throw error;
     }
     if (response.status() === 204) return null;
-    // Issue-property creation returns 201 with an empty body.
+    // Work item property creation returns 201 with an empty body.
     const text = await safeRequest(() => response.text());
     return text ? safeRequest(() => JSON.parse(text)) : null;
   };
@@ -51,7 +51,7 @@ export async function allIssues(api, projectId) {
     const r = await api(
       `/search/jql?jql=${encodeURIComponent(`project = ${projectId} ORDER BY id ASC`)}&fields=summary,labels,description,project&maxResults=100${token ? `&nextPageToken=${encodeURIComponent(token)}` : ''}`,
     );
-    if (!Array.isArray(r?.issues)) throw Error('Invalid issue search');
+    if (!Array.isArray(r?.issues)) throw Error('Invalid work item search');
     out.push(...r.issues);
     if (r.isLast) return out;
     if (!r.nextPageToken || seen.has(r.nextPageToken)) throw Error('Invalid cursor');

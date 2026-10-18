@@ -19,12 +19,12 @@ import { adf } from './adf.mjs';
 import { activeTarget } from '../core/target.mjs';
 const same = (a, b) => assert.deepEqual(a, b);
 
-// Fixture profiles select the owned project a run writes to. `standard` is the fixture app's own
-// project and `identity` the pinned identity project, both company-managed. A consumer registers
+// Fixture profiles select the owned space a run writes to. `standard` is the fixture app's own
+// space and `identity` the pinned identity space, both company-managed. A consumer registers
 // further profiles (registerProfile) before opening or recovering such a run: { project(app) ->
-// key, marker(app) -> project description marker, allow({ app, host }) throws when not allowed,
-// missing: message when the marked project is absent, style?: 'classic' (default) or 'next-gen'
-// for a team-managed project }.
+// key, marker(app) -> space description marker, allow({ app, host }) throws when not allowed,
+// missing: message when the marked space is absent, style?: 'classic' (default) or 'next-gen'
+// for a team-managed space }.
 const profiles = new Map();
 export function registerProfile(name, definition) {
   if (!/^[a-z][a-z0-9-]*$/.test(name) || ['standard', 'identity'].includes(name))
@@ -46,11 +46,11 @@ export async function openRun(
   { recover, directory = activeTarget().runs, profile = 'standard' } = {},
 ) {
   if (!projects()[app]) throw Error('Unsupported fixture app');
-  // The identity profile uses the pinned identity project, validated below; the lane that
+  // The identity profile uses the pinned identity space, validated below; the lane that
   // selects it owns its app-specific eligibility checks.
   if (!known(profile)) throw Error('Unsupported fixture profile');
   if (recover && !/^[0-9a-f-]{36}$/.test(recover)) throw Error('Invalid run ID');
-  // Recovery resolves the saved profile before any project operation; no caller-selected alternate target.
+  // Recovery resolves the saved profile before any space operation; no caller-selected alternate target.
   if (recover)
     profile = JSON.parse(readFileSync(`${directory}/${recover}.json`)).fixtureProfile ?? 'standard';
   if (!known(profile)) throw Error('Unsupported saved fixture profile');
@@ -73,7 +73,7 @@ export async function openRun(
     project.style !== (extension?.style ?? 'classic') ||
     project.projectTypeKey !== 'software'
   )
-    throw Error(extension?.missing ?? 'Owned isolated fixture project required. Run prepare.');
+    throw Error(extension?.missing ?? 'Owned isolated fixture space required. Run prepare.');
   const user = await api('/myself');
   if (!user?.accountId) throw Error('Authenticated fixture identity required');
   const verifyIdentityProject = async () => {
@@ -83,7 +83,7 @@ export async function openRun(
         user.accountId !== identity.actors.owner ||
         String((await api(`/project/${project.id}/permissionscheme`))?.id) !== identity.scheme.id)
     )
-      throw Error('Identity fixture project, scheme or setup actor mismatch');
+      throw Error('Identity fixture space, scheme or setup actor mismatch');
   };
   await verifyIdentityProject();
   await checkFixturePermissions(api, project.id);
@@ -93,7 +93,7 @@ export async function openRun(
   const lock = `${directory}/${project.id}.lock`;
   if (existsSync(lock)) {
     const holder = JSON.parse(readFileSync(lock));
-    if (!recover || holder.runId !== recover) throw Error('Fixture project is locked');
+    if (!recover || holder.runId !== recover) throw Error('Fixture space is locked');
     let alive = true;
     try {
       process.kill(holder.pid, 0);
@@ -129,14 +129,14 @@ export async function openRun(
     const verifyProject = async () => {
       const p = await api(`/project/${project.id}`);
       if (p?.id !== project.id || p.key !== projectKey || !isMarker(p.description, marker))
-        throw Error('Project ownership changed');
+        throw Error('Space ownership changed');
       await verifyIdentityProject();
     };
     const issueRead = (id) =>
       api(
         `/issue/${id}?fields=summary,labels,description,project,issuetype,subtasks,attachment,issuelinks,status,assignee,reporter,priority,versions,fixVersions,components,duedate,timetracking,worklog&properties=${markerForms(markers.fixtureProperty).join(',')}`,
       );
-    // Jira's history shows changes to the issue, all by this run's account and during the run:
+    // Jira's history shows changes to the work item, all by this run's account and during the run:
     // from its start to now, or for a recovered run, to when that run finished.
     const changedOnlyByRun = async (id) => {
       const history = await api(`/issue/${id}/changelog?maxResults=100`);
@@ -157,8 +157,8 @@ export async function openRun(
       await verifyProject();
       const x = value ?? (await issueRead(entry.id));
       if (!x || x.id !== entry.id || x.fields.project.id !== project.id)
-        throw Error('Issue identity mismatch');
-      if (x.fields.summary !== entry.expected.summary) throw Error('Issue summary changed');
+        throw Error('Work item identity mismatch');
+      if (x.fields.summary !== entry.expected.summary) throw Error('Work item summary changed');
       same([...(x.fields.labels ?? [])].sort(), [...entry.expected.labels].sort());
       if (entry.expected.propertyMarker)
         same(
@@ -178,20 +178,20 @@ export async function openRun(
             }
           })
         )
-          throw Error('Issue Description differs from every reviewed mutation intent');
+          throw Error('Work item Description differs from every reviewed mutation intent');
       } else same(x.fields.description, entry.expected.description);
       if (entry.expected.customField) {
         const field = entry.expected.customField;
         try {
           same((await api(`/issue/${entry.id}?fields=${field.id}`)).fields[field.id], field.value);
         } catch (error) {
-          // A save can land after its test stopped and before it recorded the new value. The
-          // field is still the run's own while nothing but this run's account changed the issue.
+          // A save can land after its test stopped and before it recorded the new value. The field
+          // is still the run's own while nothing but this run's account changed the work item.
           if (!(await changedOnlyByRun(entry.id))) throw error;
         }
       }
       if (x.fields.subtasks?.length || x.fields.attachment?.length || x.fields.issuelinks?.length)
-        throw Error('Issue acquired external dependents');
+        throw Error('Work item acquired external dependents');
       const stable = JSON.parse(
         JSON.stringify(
           Object.fromEntries(
@@ -210,10 +210,18 @@ export async function openRun(
           ),
         ),
       );
-      if (x.fields.worklog?.total) throw Error('Issue acquired work logs');
-      if (entry.observedFields) same(stable, entry.observedFields);
+      if (x.fields.worklog?.total) throw Error('Work item acquired work logs');
+      if (entry.observedFields && entry.expected.statusIds) {
+        // A journey that moves a fixture to another status records every status it may leave
+        // behind before the change. Statuses compare by ID: renaming one changes its other fields.
+        const { status: now, ...rest } = stable;
+        const { status: then, ...baseline } = entry.observedFields;
+        same(rest, baseline);
+        if (![then?.id, now?.id].every((id) => entry.expected.statusIds.includes(id)))
+          throw Error('Work item status differs from every recorded intent');
+      } else if (entry.observedFields) same(stable, entry.observedFields);
       else {
-        // Without a baseline from creation time, cleanup may take one only for an issue found by
+        // Without a baseline from creation time, cleanup may take one only for a work item found by
         // its unique run marker after a lost create response, and only while it still looks
         // exactly as created: the checks above passed, this run's account reported it, and it
         // has the requested type. Anything else needs inspection.
@@ -222,12 +230,12 @@ export async function openRun(
           x.fields.reporter?.accountId === run.state.actor &&
           x.fields.issuetype?.id === entry.expected.typeId;
         if (run.state.status !== 'active' && !untouchedReconciled)
-          throw Error('Issue baseline missing; inspect ambiguous creation');
+          throw Error('Work item baseline missing; inspect ambiguous creation');
         entry.observedFields = stable;
         run.persist();
       }
 
-      if ((await comments(api, entry.id)).length) throw Error('Issue acquired comments');
+      if ((await comments(api, entry.id)).length) throw Error('Work item acquired comments');
     };
     const adapters = {
       issue: {
@@ -267,6 +275,13 @@ export async function openRun(
             }
           return found;
         },
+        // No work item in the space has the create's summary or its marker label. The create sets
+        // the marker in the same request, so a create that landed always leaves one of them.
+        absent: async (expected) =>
+          !(await allIssues(api, project.id)).some(
+            (x) =>
+              x.fields.summary === expected.summary || x.fields.labels?.includes(expected.marker),
+          ),
         verify: verifyIssue,
         remove: async (entry) => {
           await verifyIssue(entry);
@@ -304,7 +319,18 @@ export async function openRun(
                 entry.expected.labels?.length === 0)
             ))
         )
-          throw Error('Invalid issue ownership marker');
+          throw Error('Invalid work item ownership marker');
+        const statusIds = entry.kind === 'issue' ? entry.expected.statusIds : undefined;
+        if (
+          statusIds !== undefined &&
+          !(
+            Array.isArray(statusIds) &&
+            statusIds.length >= 1 &&
+            statusIds.length <= 10 &&
+            statusIds.every((id) => typeof id === 'string' && /^[1-9]\d*$/.test(id))
+          )
+        )
+          throw Error('Invalid work item status intent');
       }
       run = new FixtureRun({ state, save, adapters });
     } else {
@@ -321,14 +347,14 @@ export async function openRun(
       verifyProject,
       async grantProjectAdmin() {
         if (!projectAdmin)
-          throw Error('Project administration fixture requires pinned identity profile');
+          throw Error('Space administration fixture requires pinned identity profile');
         return run.create('permission-grant', await projectAdmin.intent());
       },
       async issue(summary, labels = []) {
-        // Resolve the type before intent is recorded: a project without it is a plain error,
+        // Resolve the type before intent is recorded: a space without it is a plain error,
         // not an uncertain create.
         const task = project.issueTypes.find((t) => !t.subtask && t.name === 'Task');
-        if (!task) throw Error('The fixture project has no Task issue type.');
+        if (!task) throw Error('The fixture space has no Task work type.');
         const marker = markers.runMarker(runId, run.state.resources.length);
         return run.create('issue', {
           summary,
@@ -338,13 +364,13 @@ export async function openRun(
           typeId: task.id,
         });
       },
-      // An issue of a chosen type, marked by an issue property instead of a label, with
+      // A work item of a chosen type, marked by a work item property instead of a label, with
       // `body` plus the run marker as its Description.
       async propertyIssue(summary, body, typeId) {
         if (typeof typeId !== 'string' || !/^[1-9]\d*$/.test(typeId))
-          throw Error('Read the configured issue type before creating a fixture.');
+          throw Error('Read the configured work type before creating a fixture.');
         const type = project.issueTypes.find((t) => t.id === typeId && !t.subtask);
-        if (!type) throw Error('Configured issue type is unavailable in the owned project.');
+        if (!type) throw Error('Configured work type is unavailable in the owned space.');
         const marker = markers.runMarker(runId, run.state.resources.length);
         return run.create('issue', {
           summary,
@@ -357,7 +383,9 @@ export async function openRun(
       },
       async cleanup() {
         try {
-          await run.cleanup({ concurrency: 1 });
+          // Only a recovery, run after the journal's run finished, may close a create that never
+          // landed; a run's own cleanup right after a lost response can't tell yet.
+          await run.cleanup({ concurrency: 1, ...(recover ? { absentAfterMs: 300_000 } : {}) });
         } finally {
           if (run.state.status === 'clean') unlinkSync(lock);
         }

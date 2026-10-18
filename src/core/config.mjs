@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // Everything site- or account-specific comes from one configuration object, never from code:
-// owned sites, Forge installations, fixture project keys and the marker namespace. In CI it is
+// owned sites, Forge installations, fixture space keys and the marker namespace. In CI it is
 // the FORGE_TEST_CONFIG secret (JSON); locally a git-ignored .local/forge-test.json, or the file
 // named by FORGE_TEST_CONFIG_FILE. Loaded on first use, so a caller may configure() first.
 // Schema and examples: docs/configuration.md.
@@ -54,10 +54,10 @@ export function validateConfig(value) {
   const apps = fixtures.apps ?? {};
   const projects = fixtures.projects ?? {};
   for (const [name, projectKey] of Object.entries({ ...apps, ...projects }))
-    if (!slug.test(name) || !key.test(projectKey)) fail('fixture projects map slugs to keys');
-  if (fixtures.identity != null && !key.test(fixtures.identity)) fail('identity project key');
+    if (!slug.test(name) || !key.test(projectKey)) fail('fixture spaces map slugs to keys');
+  if (fixtures.identity != null && !key.test(fixtures.identity)) fail('identity space key');
   if (fixtures.landing != null && !/^[A-Z][A-Z0-9_]{1,9}-[1-9]\d*$/.test(fixtures.landing))
-    fail('landing must be an issue key');
+    fail('landing must be a work item key');
   return structuredClone({
     namespace,
     legacyNamespaces: legacy,
@@ -123,28 +123,28 @@ export function daysUntilExpiry(siteHost, now = new Date()) {
   return expiresOn ? Math.floor((Date.parse(expiresOn) - now.getTime()) / 86_400_000) : null;
 }
 
-/** Disposable fixture projects by fixture app. */
+/** Disposable fixture spaces by fixture app. */
 export const fixtureApps = () => ({ ...config().fixtures.apps });
 
-/** A named fixture project key: a fixture app, or another named project such as an isolation one. */
+/** A named fixture space key: a fixture app, or another named space such as an isolation one. */
 export function fixtureProject(name) {
   const { apps, projects } = config().fixtures;
   const value = apps[name] ?? projects[name];
-  if (!value) throw Error(`No fixture project configured for ${name}.`);
+  if (!value) throw Error(`No fixture space configured for ${name}.`);
   return value;
 }
 
-/** The identity fixture project key (pinned owner, member and restricted accounts). */
+/** The identity fixture space key (pinned owner, member and restricted accounts). */
 export function identityProjectKey() {
   const value = config().fixtures.identity;
-  if (!value) throw Error('No identity fixture project configured.');
+  if (!value) throw Error('No identity fixture space configured.');
   return value;
 }
 
-/** The issue a browser sign-in lands on. */
+/** The work item a browser sign-in lands on. */
 export function landingIssue() {
   const value = config().fixtures.landing;
-  if (!value) throw Error('No landing issue configured.');
+  if (!value) throw Error('No landing work item configured.');
   return value;
 }
 

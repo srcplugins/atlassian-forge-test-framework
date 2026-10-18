@@ -4,16 +4,16 @@ import { isMarker, markers } from '../core/markers.mjs';
 
 // One hosted suite per site at a time, across machines and repositories. Repositories share an
 // owned site but not CI concurrency groups or lock files, and a suite changes account-wide
-// state (the owner's theme) and site-wide configuration. The lease is a project property on the
-// marked identity project (or the landing issue's development project): written, then read back
+// state (the owner's theme) and site-wide configuration. The lease is a space property on the
+// marked identity space (or the landing work item's development space): written, then read back
 // after two pauses, so of two simultaneous writers only the one whose value stayed proceeds.
-// Jira project properties have no compare-and-swap, so this is a settle window, not an atomic
+// Jira space properties have no compare-and-swap, so this is a settle window, not an atomic
 // lock: a competing write delayed past both pauses is caught by the next renewal instead. It is
 // renewed while the suite runs and expires on its own if the holder disappears.
 
 const minute = 60_000;
 
-/** The marked project that holds the lease. */
+/** The marked space that holds the lease. */
 function leaseProject() {
   const { identity, landing } = config().fixtures;
   if (identity) return { key: identity, marker: markers.identityProject };
@@ -48,7 +48,7 @@ export function siteLease(
     async acquire() {
       const owned = await api(`/project/${project.key}`);
       if (!isMarker(owned?.description, project.marker))
-        throw Error('The site lease project is not a marked fixture project.');
+        throw Error('The site lease space is not a marked fixture space.');
       const deadline = now() + wait;
       let waiting;
       for (;;) {

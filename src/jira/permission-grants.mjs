@@ -41,7 +41,7 @@ function permissionFixture(api, identity, verifyProject, expectedGrant) {
       assert.ok(page.values.length > 0);
       start += page.values.length;
     }
-    throw Error('Project inventory limit; cannot prove scheme isolation');
+    throw Error('Space inventory limit; cannot prove scheme isolation');
   }
   function checkIntent(expected) {
     assert.deepEqual(expected.grant, expectedGrant);

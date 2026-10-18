@@ -66,7 +66,7 @@ export async function panel(page, app, key, label) {
   // environments are unverified, so refuse rather than guess.
   const suffix = { development: ' DEV', production: '' }[activeEnvironment()];
   if (suffix === undefined)
-    throw Error('Issue panels are verified for development and production only.');
+    throw Error('Work item panels are verified for development and production only.');
   const title = page.getByRole('heading', { name: `${label}${suffix}`, exact: true });
   if (!(await title.isVisible())) {
     const items = page.getByRole('menuitem', { name: label, exact: true });

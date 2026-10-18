@@ -25,7 +25,7 @@ test('configured sites, fixtures and expiry are read by role and name', () => {
   assert.throws(() => siteFor('missing'), /No owned site/);
   assert.deepEqual(fixtureApps(), { 'demo-app': 'DEMO', 'forge-sandbox': 'SBOX' });
   assert.equal(fixtureProject('tenant-isolation'), 'ISO');
-  assert.throws(() => fixtureProject('unknown'), /No fixture project/);
+  assert.throws(() => fixtureProject('unknown'), /No fixture space/);
   assert.equal(identityProjectKey(), 'AUTH');
   assert.equal(landingIssue(), 'DEV-1');
   assert.equal(daysUntilExpiry(primary, new Date('2998-12-31T00:00:00Z')), 1);

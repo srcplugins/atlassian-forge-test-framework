@@ -125,8 +125,8 @@ export async function login(profile = 'admin') {
     console.log(
       `Sign in normally in the opened Chrome window as the ${profile} account. No password is collected.`,
     );
-    // Signed in once the landing issue shows its app actions, or Jira returns the signed-in user
-    // (an account without access to the landing issue still gets a usable session).
+    // Signed in once the landing work item shows its app actions, or Jira returns the signed-in
+    // user (an account without access to the landing work item still gets a usable session).
     const deadline = Date.now() + 900_000;
     for (;;) {
       if (await page.getByRole('button', { name: 'View app actions', exact: true }).isVisible())
@@ -146,7 +146,7 @@ export async function login(profile = 'admin') {
 }
 
 /**
- * Creates once, or verifies, each configured fixture app's marked company-managed project and
+ * Creates once, or verifies, each configured fixture app's marked company-managed space and
  * adds the account to its Administrators role. Unresolved earlier attempts stop it.
  */
 export async function prepare() {
@@ -161,7 +161,7 @@ export async function prepare() {
       const journal = `${target.directory}/project-${key}.json`;
       if (!project) {
         if (existsSync(journal))
-          throw Error(`Unresolved project creation ${key}; inspect before retry`);
+          throw Error(`Unresolved space creation ${key}; inspect before retry`);
         writeFileSync(journal, JSON.stringify({ app, key, status: 'creating' }), {
           flag: 'wx',
           mode: 0o600,
@@ -182,15 +182,14 @@ export async function prepare() {
         project.key !== key ||
         project.style !== 'classic'
       )
-        throw Error(`Project ownership mismatch ${key}`);
+        throw Error(`Space ownership mismatch ${key}`);
       const roles = await api(`/project/${project.id}/role`);
       const roleId = roles.Administrators?.match(/\/role\/(\d+)$/)?.[1];
       if (!roleId) throw Error('Expected fixture administrator role missing');
       let role = await api(`/project/${project.id}/role/${roleId}`);
       if (!role.actors.some((a) => a.actorUser?.accountId === user.accountId)) {
         const old = existsSync(journal) ? JSON.parse(readFileSync(journal)) : {};
-        if (old.roleAttempt)
-          throw Error('Unresolved project-role assignment; inspect before retry');
+        if (old.roleAttempt) throw Error('Unresolved space-role assignment; inspect before retry');
         writeFileSync(
           journal,
           JSON.stringify({ app, key, id: project.id, status: 'verified', roleAttempt: true }),
@@ -206,7 +205,7 @@ export async function prepare() {
         JSON.stringify({ app, key, id: project.id, status: 'verified', roleId }),
         { mode: 0o600 },
       );
-      console.log(`${app}: owned fixture project verified`);
+      console.log(`${app}: owned fixture space verified`);
     }
   } finally {
     await context.dispose();
@@ -348,7 +347,7 @@ export function restore(env = process.env) {
 
 /**
  * Values a public CI log must never show: owned hosts, environment IDs, pinned account IDs and
- * the fixture project keys (which also hides every issue key in those projects). The workflow
+ * the fixture space keys (which also hides every work item key in those spaces). The workflow
  * masks each (::add-mask::) before anything else runs.
  */
 export function maskValues() {
@@ -364,7 +363,7 @@ export function maskValues() {
     landing?.split('-')[0],
   ];
   // Hosts and IDs are long; a short value would blank ordinary log text, so they need six
-  // characters. Project keys are short by nature and are masked from three.
+  // characters. Space keys are short by nature and are masked from three.
   return [
     ...new Set([
       ...values.filter((v) => typeof v === 'string' && v.length >= 6),

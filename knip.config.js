@@ -1,4 +1,4 @@
 export default {
-  entry: ['bin/*.mjs', 'tests/*.test.mjs'],
-  project: ['{bin,src,tests}/**/*.mjs', '*.{js,mjs}'],
+  entry: ['bin/*.mjs', 'scripts/*.mjs', 'tests/*.test.mjs'],
+  project: ['{bin,scripts,src,tests}/**/*.mjs', '*.{js,mjs}'],
 };

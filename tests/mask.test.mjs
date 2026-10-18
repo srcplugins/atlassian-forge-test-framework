@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { environmentId, primary, second } from './support/config.mjs';
 import { maskValues } from '../src/jira/commands.mjs';
 
-// A public CI log masks every owned host, environment ID and fixture project key from the
+// A public CI log masks every owned host, environment ID and fixture space key from the
 // private configuration (tests/support/config.mjs).
-test('mask covers owned hosts, environment IDs and every fixture project key', () => {
+test('mask covers owned hosts, environment IDs and every fixture space key', () => {
   const masked = maskValues();
   for (const value of [primary, second, environmentId, 'DEMO', 'SBOX', 'ISO', 'AUTH', 'DEV'])
     assert.ok(masked.includes(value), value);

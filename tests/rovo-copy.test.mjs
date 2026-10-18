@@ -2,8 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { copyAgentProfile } from '../src/core/rovo.mjs';
-// Fast offline polling; the hosted journey keeps the default five-second wait.
-const poll = { timeout: 50, intervals: [1] };
+// Offline polling: tight intervals, but a generous budget so a loaded machine can't
+// fail the passing cases; only the timeout case uses the short budget. The hosted
+// journey keeps the default five-second wait.
+const poll = { timeout: 5000, intervals: [1] };
+const expire = { timeout: 50, intervals: [1] };
 const profile =
   '/o/12345678-1234-1234-1234-123456789abc/people/agent/12345678-1234-1234-1234-123456789abc';
 function clipboardFixture(result, delay = 0) {
@@ -55,7 +58,7 @@ test('agent copy rejects foreign hosts and malformed profile links', async () =>
 test('agent copy times out without retrying the click or accepting the old clipboard', async () => {
   const fixture = clipboardFixture(null);
   await assert.rejects(
-    copyAgentProfile(fixture.page, fixture.button, poll),
+    copyAgentProfile(fixture.page, fixture.button, expire),
     /Copy link did not complete/,
   );
   assert.equal(fixture.counts().clicks, 1);

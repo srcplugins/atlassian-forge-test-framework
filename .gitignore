@@ -5,3 +5,9 @@ playwright-report/
 *.key
 *.age
 .DS_Store
+# Agent instructions stay local; the public repository carries none.
+CLAUDE.md
+AGENTS.md
+.claude/
+.codex/
+.cursor/

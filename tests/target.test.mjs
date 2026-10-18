@@ -34,7 +34,10 @@ test('installation selection never falls back across tenant or environment', () 
     /Exactly one/,
   );
   assert.throws(() => selectInstallation(targets, 'demo-app', primary, ''), /Unsupported/);
-  assert.throws(() => selectInstallation(targets, 'demo-app', 'bad.atlassian.net'), /Owned/);
+  assert.throws(
+    () => selectInstallation(targets, 'demo-app', 'bad-example.atlassian.net'),
+    /Owned/,
+  );
 });
 
 test('install targets default to primary development and explicitly select production', () => {
@@ -59,7 +62,7 @@ test('install targets default to primary development and explicitly select produ
     ['-e', ''],
     ['-e', 'prod'],
     ['-e', 'production', '--environment', 'development'],
-    ['--site', 'elsewhere.atlassian.net'],
+    ['--site', 'elsewhere-example.atlassian.net'],
     ['--role=primary', '--role=isolation'],
     ['--upgrade=true'],
     ['--product', 'confluence'],

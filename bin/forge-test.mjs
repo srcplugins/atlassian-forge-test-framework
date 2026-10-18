@@ -25,7 +25,7 @@ const usage = `Usage: forge-test <command>
   doctor                         Check the configured Jira account (read-only)
   preflight <host>               Inventory an owned site (read-only)
   login [profile]                Save a browser session after a manual sign-in
-  prepare                        Create or verify the marked fixture projects
+  prepare                        Create or verify the marked fixture spaces
   cleanup <fixture-app> <run>    Guarded cleanup of one journaled run
   lane <lane> [--config f] [-- args]  Run a Playwright lane (features, compatibility)
   suite <name> [--only a,b] [--list]  Run a suite from forge-test.mjs (--only: its prerequisites
@@ -33,7 +33,7 @@ const usage = `Usage: forge-test <command>
   install [--role r] [-e env]    Install or upgrade the app through the module's Forge command
   secrets --repo o/r --env e [--profiles a,b] [--dry-run]   Copy state into GitHub secrets
   restore                        Write sessions from CI secrets into the private state layout
-  mask                           Print ::add-mask:: lines for owned hosts, IDs and fixture project keys`;
+  mask                           Print ::add-mask:: lines for owned hosts, IDs and fixture space keys`;
 
 async function consumer() {
   const file = resolve('forge-test.mjs');

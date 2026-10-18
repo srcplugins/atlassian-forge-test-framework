@@ -6,7 +6,7 @@ import { definePlaywrightConfig, laneProject, selectedLanes } from '../src/core/
 
 test('lanes refuse unowned sites, unknown browsers and unknown lane names', () => {
   assert.throws(
-    () => laneProject('features', { PLUGIN_TEST_SITE: 'other.atlassian.net' }),
+    () => laneProject('features', { PLUGIN_TEST_SITE: 'other-example.atlassian.net' }),
     /Owned/,
   );
   assert.throws(() => laneProject('compatibility', { COMPAT_BROWSER: 'safari' }), /COMPAT_BROWSER/);
