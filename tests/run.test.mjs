@@ -28,6 +28,7 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
     denied: null,
     comments: [], // Comments on every fixture work item.
     changelogs: new Map(), // Work item ID to its history entries.
+    propertyLag: 0, // Work item reads that still come back without the create's properties.
   };
   let deletes = 0;
   let nextId = 888;
@@ -82,10 +83,13 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
       } else {
         const issue = data.issues.get(id);
         const keys = (searchParams.get('properties') ?? '').split(',');
+        const lagging = issue && keys[0] && data.propertyLag > 0 && data.propertyLag--;
         body = issue && {
           ...issue,
           properties: Object.fromEntries(
-            keys.filter((k) => k in issue.properties).map((k) => [k, issue.properties[k]]),
+            keys
+              .filter((k) => !lagging && k in issue.properties)
+              .map((k) => [k, issue.properties[k]]),
           ),
         };
         body ??= null;
@@ -183,6 +187,60 @@ test('recovery closes a create that never landed only after five minutes and wit
     assert.equal(closed.resources[0].reconciled, 'absent');
     assert.equal(t.deletes, 0);
     assert.equal(t.data.posts.length, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('a marker property that lands just after the create is read back with a bounded re-read', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport({ app: typedApp, key: 'DEMO' });
+  try {
+    const f = await openRun(t.request, typedApp, { directory });
+    t.data.propertyLag = 2;
+    const prompt = await f.propertyIssue('Prompt fixture', 'Synthetic instructions', '39');
+    assert.equal(t.data.propertyLag, 0);
+    assert.equal(t.data.posts.length, 1, 'the create is never repeated');
+    assert.ok(prompt.observedFields && prompt.prepareMs >= 0);
+    await f.cleanup();
+    assert.equal(t.deletes, 1);
+    assert.equal(f.run.state.status, 'clean');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('a created work item whose check at creation failed is cleaned up only while unchanged since the create', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport({ app: typedApp, key: 'DEMO' });
+  try {
+    const f = await openRun(t.request, typedApp, { directory });
+    t.data.propertyLag = Infinity;
+    await assert.rejects(() => f.propertyIssue('Prompt fixture', 'Synthetic instructions', '39'));
+    t.data.propertyLag = 0;
+    const [entry] = f.run.state.resources;
+    assert.equal(entry.status, 'created');
+    assert.equal(entry.observedFields, undefined);
+    t.data.changelogs.set(entry.id, [
+      {
+        author: { accountId: 'test-owner' },
+        created: new Date().toISOString(),
+        items: [{ field: 'priority' }],
+      },
+    ]);
+    await assert.rejects(() => f.cleanup(), /incomplete/, 'changed since the create');
+    assert.match(f.run.state.leftovers[0].reason, /baseline missing/);
+    t.data.issue.fields.issuetype = { id: '1' };
+    t.data.changelogs.delete(entry.id);
+    await assert.rejects(() => f.cleanup(), /incomplete/, 'another work type');
+    t.data.issue.fields.issuetype = { id: '39' };
+    writeFileSync(
+      join(directory, '777.lock'),
+      JSON.stringify({ runId: f.run.state.runId, pid: 2147483647 }),
+    );
+    const resumed = await openRun(t.request, typedApp, { directory, recover: f.run.state.runId });
+    await resumed.cleanup();
+    assert.equal(resumed.run.state.status, 'clean');
+    assert.equal(t.deletes, 1);
+    assert.equal(t.data.posts.length, 1);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -412,7 +470,7 @@ test('fixture transport accepts an empty 201 property response without retrying 
   body = 'private invalid content';
   await assert.rejects(() => api('/issue', 'POST', {}), {
     message:
-      'Verification transport failed. Request diagnostics suppressed to protect credentials.',
+      'Verification transport failed (POST HTTP 201 JSON parse: SyntaxError). Request diagnostics suppressed to protect credentials.',
   });
   assert.equal(calls, 3);
 });

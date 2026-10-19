@@ -153,20 +153,35 @@ export async function openRun(
         )
       );
     };
+    const markerProperty = (x) =>
+      markerForms(markers.fixtureProperty)
+        .map((key) => x?.properties?.[key])
+        .find((value) => value !== undefined);
+    // Jira stores a create's properties just after the work item itself, so the read right after
+    // the create can come back without the marker. Only that read is repeated, a few times.
+    const createdRead = async (entry) => {
+      for (const wait of [250, 500, 1000, 2000, null]) {
+        const x = await issueRead(entry.id);
+        if (!entry.expected.propertyMarker || markerProperty(x) !== undefined || wait === null)
+          return x;
+        await new Promise((done) => setTimeout(done, wait));
+      }
+    };
+    // Jira's history is empty while nothing has changed a field since the create.
+    const unchangedSinceCreate = async (id) => {
+      const history = await api(`/issue/${id}/changelog?maxResults=100`);
+      return history?.isLast === true && history.values.length === 0;
+    };
     const verifyIssue = async (entry, value) => {
       await verifyProject();
-      const x = value ?? (await issueRead(entry.id));
+      const creating =
+        run.state.status === 'active' && value === undefined && entry.observedFields === undefined;
+      const x = value ?? (await (creating ? createdRead(entry) : issueRead(entry.id)));
       if (!x || x.id !== entry.id || x.fields.project.id !== project.id)
         throw Error('Work item identity mismatch');
       if (x.fields.summary !== entry.expected.summary) throw Error('Work item summary changed');
       same([...(x.fields.labels ?? [])].sort(), [...entry.expected.labels].sort());
-      if (entry.expected.propertyMarker)
-        same(
-          markerForms(markers.fixtureProperty)
-            .map((key) => x.properties?.[key])
-            .find((value) => value !== undefined),
-          { marker: entry.expected.marker },
-        );
+      if (entry.expected.propertyMarker) same(markerProperty(x), { marker: entry.expected.marker });
       if (entry.expected.descriptionVariants) {
         if (
           !entry.expected.descriptionVariants.some((value) => {
@@ -221,15 +236,21 @@ export async function openRun(
           throw Error('Work item status differs from every recorded intent');
       } else if (entry.observedFields) same(stable, entry.observedFields);
       else {
-        // Without a baseline from creation time, cleanup may take one only for a work item found by
-        // its unique run marker after a lost create response, and only while it still looks
-        // exactly as created: the checks above passed, this run's account reported it, and it
-        // has the requested type. Anything else needs inspection.
-        const untouchedReconciled =
-          entry.reconciled === true &&
+        // Without a baseline from creation time, cleanup may take one only while the work item
+        // still looks exactly as created: the checks above passed, this run's account reported it,
+        // and it has the requested type. That covers one found by its unique run marker after a
+        // lost create response, and one whose ID came from the create response but whose check at
+        // creation never completed, while Jira's history shows no change since the create.
+        // Anything else needs inspection.
+        const asCreated = () =>
           x.fields.reporter?.accountId === run.state.actor &&
           x.fields.issuetype?.id === entry.expected.typeId;
-        if (run.state.status !== 'active' && !untouchedReconciled)
+        const untouched = async () =>
+          entry.reconciled === true ||
+          (entry.reconciled === undefined &&
+            entry.prepareMs === undefined &&
+            (await unchangedSinceCreate(entry.id)));
+        if (run.state.status !== 'active' && !(asCreated() && (await untouched())))
           throw Error('Work item baseline missing; inspect ambiguous creation');
         entry.observedFields = stable;
         run.persist();

@@ -8,8 +8,12 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
     // Jira remembers an open chat panel across page loads and restores it after the top bar
     // renders, sometimes seconds later; opening it again would close it. Give the panel time
     // to appear, then open it until its menu shows (a click that closed a late panel reopens it).
+    // Narrower windows label the chat button "Ask Rovo".
     const menu = page.getByRole('button', { name: 'Menu', exact: true });
-    const open = page.getByRole('button', { name: 'Open Rovo Chat', exact: true });
+    const open = page
+      .getByRole('button', { name: 'Open Rovo Chat', exact: true })
+      .or(page.getByRole('button', { name: 'Ask Rovo', exact: true }))
+      .first();
     await expect(menu.or(open).first()).toBeVisible({ timeout: 45000 });
     await menu.waitFor({ timeout: 10000 }).catch(() => {});
     await expect(async () => {

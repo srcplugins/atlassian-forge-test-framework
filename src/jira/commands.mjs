@@ -77,27 +77,30 @@ export async function doctor() {
   const cfg = jiraConfig();
   if (!cfg.email || !cfg.token) throw Error('Set JIRA_EMAIL and JIRA_API_KEY.');
   const get = (path) =>
-    safeRequest(() =>
-      fetch(`https://${cfg.site}/rest/api/3${path}`, {
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString('base64')}`,
-          Accept: 'application/json',
-        },
-        redirect: 'error',
-        signal: AbortSignal.timeout(20000),
-      }),
+    safeRequest(
+      () =>
+        fetch(`https://${cfg.site}/rest/api/3${path}`, {
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString('base64')}`,
+            Accept: 'application/json',
+          },
+          redirect: 'error',
+          signal: AbortSignal.timeout(20000),
+        }),
+      'GET fetch',
     );
   const response = await get('/myself');
   if (!response.ok)
     throw Error(
       `Jira authentication probe: HTTP ${response.status}. Check token expiry, email and scopes.`,
     );
-  const user = await safeRequest(() => response.json());
+  const user = await safeRequest(() => response.json(), 'GET HTTP 200 body read');
   if (!user.accountId || !user.active) throw Error('Jira did not return an active account.');
   console.log('Jira authentication OK; active account verified.');
   const permissions = await get('/mypermissions?permissions=ADMINISTER');
   if (!permissions.ok) throw Error(`Permission probe: HTTP ${permissions.status}`);
-  const admin = (await safeRequest(() => permissions.json())).permissions?.ADMINISTER;
+  const admin = (await safeRequest(() => permissions.json(), 'GET HTTP 200 body read')).permissions
+    ?.ADMINISTER;
   console.log(`Jira administrator: ${admin?.havePermission === true}`);
 }
 

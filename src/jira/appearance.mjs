@@ -69,6 +69,15 @@ export const test = base.extend({
         await expect(page.locator('html')).toHaveAttribute('data-color-mode', name.toLowerCase());
       await page.keyboard.press('Escape');
       await page.keyboard.press('Escape');
+      if (name === 'Match browser') return;
+      // Jira applies a new theme at once but saves it a moment later, and a page loaded before
+      // the save still renders the old one, so return only once a fresh load shows the theme.
+      await expect(async () => {
+        await open();
+        await expect(page.locator('html')).toHaveAttribute('data-color-mode', name.toLowerCase(), {
+          timeout: 5000,
+        });
+      }).toPass({ timeout: 90000, intervals: [1000, 2000, 5000] });
     }
     try {
       await open();

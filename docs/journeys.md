@@ -32,7 +32,7 @@ test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
 - **Locks.** One run per fixture space at a time; a suite also holds the site lease ([CI](ci.md#one-run-at-a-time)).
 - **Markers.** Everything a run writes carries the namespace: labels and properties use `markers.runMarker`, and a resource your own runner creates should use `markers.acceptance(name, detail)`, so two apps on one site never mistake each other's fixtures.
 - **Unresolved runs.** An unresolved earlier run on the same space stops a new one; recover it with `forge-test cleanup`.
-- **Intent before writes.** Intent is recorded before every create. A failed create is reconciled by reading, never by repeating the request. Cleanup removes a work item found that way only while it is still as created: its run marker, summary and description match, this run's account reported it, it has the requested type, and nothing was added to it.
+- **Intent before writes.** Intent is recorded before every create. A failed create is reconciled by reading, never by repeating the request. Cleanup removes a work item found that way only while it is still as created: its run marker, summary and description match, this run's account reported it, it has the requested type, and nothing was added to it. Jira stores a create's marker property just after the work item, so creation rereads a missing marker a few times (about 4 s) before failing. A work item whose create answered but whose check at creation failed is removed under the same conditions, and only while Jira's history shows no change since the create.
 - **Cleanup checks.** Cleanup rechecks the space marker, then each resource's identity, markers and fields, and confirms each deletion independently. A custom field that differs from the journal, such as a save that landed after its test stopped, passes only when Jira's history shows that every change to the work item was made by the run's account during the run.
 
   It refuses resources that have gained dependents (subtasks, links, attachments, work logs, comments). A refusal leaves the journal as `cleanup-required` for inspection.
@@ -77,7 +77,7 @@ Recovery always uses the profile saved in the journal.
 | `projectPage(page, app, key)` | Opens the app's space page |
 | `panel(page, app, key, label)` | Opens the app's work item panel |
 | `observeAction(page, action, exercise, target, projectId?)` | Waits for one resolver response for an exact installation and returns its value |
-| `themeTest` | Journals the account's theme, lets the test change it, then restores it. The menu opens from `/jira/your-work`; `test.use({ themePage: '/browse/KEY-1' })` picks another page |
+| `themeTest` | Journals the account's theme, lets the test change it, then restores it. Setting Light or Dark returns once a fresh load of the theme page shows it, since Jira saves the choice a moment after applying it, so open the page under test afterwards. The menu opens from `/jira/your-work`; `test.use({ themePage: '/browse/KEY-1' })` picks another page |
 | `textContrast(locator)` | Asserts a 4.5:1 contrast ratio |
 | `openRovoChat`, `askRovo` (from `./browser`) | Selects one Rovo agent unambiguously and asks it something. Jira facts, not agent prose, prove results |
 | `dismissOnboarding(page)` | Completes Jira's first-run dialog whenever it appears |

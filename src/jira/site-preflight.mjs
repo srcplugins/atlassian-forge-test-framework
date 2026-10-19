@@ -8,19 +8,23 @@ export async function sitePreflight({ site, email, token, fetchImpl = fetch }) {
   if (!email || !token) throw Error('Jira credentials required.');
   const results = {};
   async function get(name, path) {
-    const response = await safeRequest(() =>
-      fetchImpl(`https://${site}/rest/api/3${path}`, {
-        method: 'GET',
-        redirect: 'error',
-        signal: AbortSignal.timeout(20000),
-        headers: {
-          Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,
-          Accept: 'application/json',
-        },
-      }),
+    const response = await safeRequest(
+      () =>
+        fetchImpl(`https://${site}/rest/api/3${path}`, {
+          method: 'GET',
+          redirect: 'error',
+          signal: AbortSignal.timeout(20000),
+          headers: {
+            Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,
+            Accept: 'application/json',
+          },
+        }),
+      'GET fetch',
     );
     results[name] = { status: response.status };
-    return response.ok ? safeRequest(() => response.json()) : null;
+    return response.ok
+      ? safeRequest(() => response.json(), `GET HTTP ${response.status} body read`)
+      : null;
   }
   const server = await get('server', '/serverInfo');
   if (server?.baseUrl !== `https://${site}` || server?.deploymentType !== 'Cloud') {

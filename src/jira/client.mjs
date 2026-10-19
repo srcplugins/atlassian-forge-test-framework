@@ -20,13 +20,15 @@ export function client(request, targetSite = site()) {
     if (targetSite !== site() && method !== 'GET') throw Error('Peer tenant API is read-only');
     if (!path.startsWith('/') || path.includes('://') || path.includes('..'))
       throw Error('Invalid Jira path');
-    const response = await safeRequest(() =>
-      request.fetch(`${targetSite}/rest/api/3${path}`, {
-        method,
-        ...(data === undefined ? {} : { data }),
-        timeout: 30000,
-        maxRedirects: 0,
-      }),
+    const response = await safeRequest(
+      () =>
+        request.fetch(`${targetSite}/rest/api/3${path}`, {
+          method,
+          ...(data === undefined ? {} : { data }),
+          timeout: 30000,
+          maxRedirects: 0,
+        }),
+      `${method} fetch`,
     );
     if (method === 'GET' && response.status() === 404) return null;
     if (!response.ok()) {
@@ -39,8 +41,9 @@ export function client(request, targetSite = site()) {
     }
     if (response.status() === 204) return null;
     // Work item property creation returns 201 with an empty body.
-    const text = await safeRequest(() => response.text());
-    return text ? safeRequest(() => JSON.parse(text)) : null;
+    const stage = `${method} HTTP ${response.status()}`;
+    const text = await safeRequest(() => response.text(), `${stage} body read`);
+    return text ? safeRequest(() => JSON.parse(text), `${stage} JSON parse`) : null;
   };
 }
 export async function allIssues(api, projectId) {
