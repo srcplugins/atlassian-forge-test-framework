@@ -25,6 +25,7 @@ test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
 |---|---|
 | `issue(summary, labels?)` | A label-marked disposable work item |
 | `propertyIssue(summary, body, typeId)` | A work item of a chosen work type, marked by a work item property instead of a label |
+| `browserIssue(summary, typeId, { fill, submit })` | A work item created through Jira's own Create form: `fill(summary)` opens and fills the form, `submit()` makes the one click that creates it, the run marker ends the summary, and the Description stays empty. A failure in `fill` wrote nothing and cleans up at once; one in `submit` is reconciled by reading |
 | `api`, `project`, `user`, `run` | The Jira client, the fixture space, the account and the journal |
 
 ## Rules the journal enforces

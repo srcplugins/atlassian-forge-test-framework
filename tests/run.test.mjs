@@ -268,6 +268,141 @@ test('a lost-response work item that someone else reported, retyped or commented
     }
   }
 });
+// Jira's Create form as the browser submits it: no labels, properties or Description.
+const formCreate = (t, typeId) => (summary) => {
+  const id = String(950 + t.data.issues.size);
+  t.data.issues.set(id, {
+    id,
+    fields: {
+      summary,
+      labels: [],
+      description: null,
+      project: { id: t.data.project.id },
+      issuetype: { id: typeId },
+      reporter: { accountId: 'test-owner' },
+      status: { id: '10', name: 'To Do' },
+      subtasks: [],
+      attachment: [],
+      issuelinks: [],
+    },
+    properties: {},
+  });
+};
+test('a work item created through the Create form is found by its summary marker and cleaned up', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    let submits = 0;
+    let filled;
+    const issue = await f.browserIssue('Form fixture', '1', {
+      fill: (summary) => {
+        filled = summary;
+      },
+      submit: () => {
+        submits++;
+        formCreate(t, '1')(filled);
+      },
+    });
+    assert.equal(submits, 1);
+    assert.equal(t.data.posts.length, 0, 'nothing is created through the API');
+    assert.match(issue.expected.summary, /^Form fixture \S+$/);
+    assert.ok(issue.expected.summary.endsWith(issue.expected.marker));
+    assert.ok(issue.id && issue.observedFields);
+    await f.cleanup();
+    assert.equal(t.deletes, 1);
+    assert.equal(f.run.state.status, 'clean');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('a Create form submit that fails after the work item landed is cleaned up, never repeated', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    let submits = 0;
+    let filled;
+    await assert.rejects(
+      () =>
+        f.browserIssue('Form fixture', '1', {
+          fill: (summary) => {
+            filled = summary;
+          },
+          submit: () => {
+            submits++;
+            formCreate(t, '1')(filled);
+            throw Error('dialog closed unexpectedly');
+          },
+        }),
+      /dialog closed unexpectedly/,
+    );
+    assert.equal(submits, 1);
+    await f.cleanup();
+    assert.equal(t.deletes, 1);
+    assert.equal(f.run.state.status, 'clean');
+    // A form that fails before its submit created nothing: the run cleans up at once.
+    const g = await openRun(t.request, 'forge-sandbox', { directory });
+    await assert.rejects(
+      () =>
+        g.browserIssue('Form fixture', '1', {
+          fill: () => {
+            throw Error('Summary field not found');
+          },
+          submit: () => assert.fail('never submitted'),
+        }),
+      /Summary field not found/,
+    );
+    assert.equal(g.run.state.resources[0].status, 'rejected');
+    // A bad work type or missing steps fail before intent is recorded.
+    const steps = { fill() {}, submit() {} };
+    await assert.rejects(() => g.browserIssue('Form fixture', '7', steps), /unavailable/);
+    await assert.rejects(() => g.browserIssue('Form fixture', 'Task', steps), /Read the work/);
+    await assert.rejects(
+      () => g.browserIssue('Form fixture', '1', { fill() {} }),
+      /fill and submit/,
+    );
+    assert.equal(g.run.state.resources.length, 1);
+    await g.cleanup();
+    assert.equal(g.run.state.status, 'clean');
+    assert.equal(t.deletes, 1);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+test('forge-test cleanup recovers a Create form work item after a hard stop', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    let filled;
+    // The process stops after the click landed, before the run could reconcile or clean up.
+    await assert.rejects(
+      () =>
+        f.browserIssue('Form fixture', '1', {
+          fill: (summary) => {
+            filled = summary;
+          },
+          submit: async () => {
+            formCreate(t, '1')(filled);
+            await f.releaseForRecovery();
+            throw Error('hard stop');
+          },
+        }),
+      /hard stop/,
+    );
+    const resumed = await openRun(t.request, 'forge-sandbox', {
+      directory,
+      recover: f.run.state.runId,
+    });
+    await resumed.cleanup();
+    assert.equal(resumed.run.state.status, 'clean');
+    assert.equal(t.deletes, 1);
+    assert.equal(t.data.posts.length, 0);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 test('a space without a Task type fails before intent is recorded', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
   const t = transport();
@@ -550,6 +685,18 @@ test("journal recovery refuses unsupported resource kinds and another run's work
           id: '5000',
           status: 'removed',
           expected: { marker, labels: [marker] },
+        };
+      },
+      /Invalid work item ownership marker/,
+    ],
+    [
+      (runId) => {
+        const marker = markers.runMarker(runId, 0);
+        return {
+          kind: 'issue',
+          id: null,
+          status: 'creating',
+          expected: { marker, labels: [], summaryMarker: true, summary: 'Form', typeId: '1' },
         };
       },
       /Invalid work item ownership marker/,

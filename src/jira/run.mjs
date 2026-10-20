@@ -258,32 +258,60 @@ export async function openRun(
 
       if ((await comments(api, entry.id)).length) throw Error('Work item acquired comments');
     };
+    // Work items created through Jira's own Create form: the journey fills the form, which writes
+    // nothing, so a failure there is a definitive rejection; then submits it, which may create.
+    // The work item is found by the run marker in its summary. Jira's search can lag the create.
+    const browserCreates = new Map();
+    const createInBrowser = async (expected) => {
+      const steps = browserCreates.get(expected.marker);
+      if (!steps) throw Error('Browser create is not available');
+      try {
+        await steps.fill(expected.summary);
+      } catch (error) {
+        error.definitiveRejection = true;
+        throw error;
+      }
+      await steps.submit();
+      for (const wait of [1000, 2000, 4000, 8000, null]) {
+        const found = (await allIssues(api, project.id)).filter(
+          (x) => x.fields.summary === expected.summary,
+        );
+        if (found.length > 1) throw Error('More than one work item has the run marker');
+        if (found.length) return found[0];
+        if (wait === null) throw Error('The created work item was not found');
+        await new Promise((done) => setTimeout(done, wait));
+      }
+    };
     const adapters = {
       issue: {
         create: (expected) =>
-          api('/issue', 'POST', {
-            fields: {
-              project: { id: project.id },
-              issuetype: {
-                id:
-                  expected.typeId ??
-                  project.issueTypes.find((t) => !t.subtask && t.name === 'Task')?.id,
-              },
-              summary: expected.summary,
-              ...(expected.propertyMarker ? {} : { labels: expected.labels }),
-              description: expected.description,
-            },
-            ...(expected.propertyMarker
-              ? {
-                  properties: [
-                    { key: markers.fixtureProperty, value: { marker: expected.marker } },
-                  ],
-                }
-              : {}),
-          }),
+          expected.summaryMarker
+            ? createInBrowser(expected)
+            : api('/issue', 'POST', {
+                fields: {
+                  project: { id: project.id },
+                  issuetype: {
+                    id:
+                      expected.typeId ??
+                      project.issueTypes.find((t) => !t.subtask && t.name === 'Task')?.id,
+                  },
+                  summary: expected.summary,
+                  ...(expected.propertyMarker ? {} : { labels: expected.labels }),
+                  description: expected.description,
+                },
+                ...(expected.propertyMarker
+                  ? {
+                      properties: [
+                        { key: markers.fixtureProperty, value: { marker: expected.marker } },
+                      ],
+                    }
+                  : {}),
+              }),
         read: issueRead,
         find: async (expected) => {
           const issues = await allIssues(api, project.id);
+          if (expected.summaryMarker)
+            return issues.filter((x) => x.fields.summary === expected.summary);
           if (!expected.propertyMarker)
             return issues.filter((x) => x.fields.labels?.includes(expected.marker));
           const found = [];
@@ -337,6 +365,10 @@ export async function openRun(
               entry.expected.labels?.includes(entry.expected.marker) ||
               (entry.expected.typeId &&
                 entry.expected.propertyMarker === entry.expected.marker &&
+                entry.expected.labels?.length === 0) ||
+              (entry.expected.typeId &&
+                entry.expected.summaryMarker === true &&
+                entry.expected.summary?.endsWith(` ${entry.expected.marker}`) &&
                 entry.expected.labels?.length === 0)
             ))
         )
@@ -401,6 +433,32 @@ export async function openRun(
           marker,
           typeId: type.id,
         });
+      },
+      // A work item of a chosen type created through Jira's own Create form, which sets no labels
+      // or properties: the run marker ends its summary and the Description stays empty.
+      // `fill(summary)` opens and fills the form without submitting it; `submit()` makes the one
+      // click that may create the work item, and nothing may repeat it.
+      async browserIssue(summary, typeId, { fill, submit } = {}) {
+        if (typeof typeId !== 'string' || !/^[1-9]\d*$/.test(typeId))
+          throw Error('Read the work type before creating a fixture.');
+        const type = project.issueTypes.find((t) => t.id === typeId && !t.subtask);
+        if (!type) throw Error('The work type is unavailable in the owned space.');
+        if (typeof fill !== 'function' || typeof submit !== 'function')
+          throw Error('A browser create needs its fill and submit steps.');
+        const marker = markers.runMarker(runId, run.state.resources.length);
+        browserCreates.set(marker, { fill, submit });
+        try {
+          return await run.create('issue', {
+            summary: `${summary} ${marker}`,
+            labels: [],
+            summaryMarker: true,
+            description: null,
+            marker,
+            typeId: type.id,
+          });
+        } finally {
+          browserCreates.delete(marker);
+        }
       },
       async cleanup() {
         try {
