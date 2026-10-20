@@ -5,6 +5,7 @@ Hosted acceptance testing for Atlassian Forge apps, run against Atlassian sites 
 - **Disposable fixtures with a journal.** Every write is recorded before it happens. Cleanup deletes only what the run created, after re-checking ownership, and an uncertain write is never retried.
 - **Owned sites only.** Every command refuses a site that isn't in your configuration.
 - **Playwright lanes** for Chrome journeys: serial, no retries, stop at the first failure.
+- **A page guard on every journey:** a test fails when Jira shows an error flag it didn't declare, or when the app's frame stays behind Jira's loading placeholder, even if every assertion of its own passed.
 - **Jira helpers:** a REST client, work item panel and space page locators, theme handling, Rovo agent selection and resolver observation.
 - **CI support:** credentials and private evidence stay out of public logs.
 
