@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 (unreleased)
+## 0.3.1
 
 - **Create-form fixtures:** `owned.browserIssue(summary, typeId, { fill, submit })` journals a work item that the journey creates through Jira's own Create form. The run marker ends its summary and the work item is found by it. A failure while filling the form wrote nothing; a failed submit is reconciled by reading, never repeated.
 
