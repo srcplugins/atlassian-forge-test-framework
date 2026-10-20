@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **Page guard:** every test from `/jira` fails when Jira shows an error flag the test didn't declare ("Created Story with exceptions", "Something went wrong", "We couldn't load …") or when an app frame stays behind Jira's loading placeholder for longer than `appLoadLimit` (15 s). Declare expected flags with `test.use({ expectedFlags })` or `pageGuard.allowFlag(pattern)`.
+- **Create-form fixtures:** `owned.browserIssue` returns once Jira shows the Create outcome flag, and fails at once if it's an error, so a field that Jira couldn't save after the create fails the test.
+
 ## 0.3.1
 
 - **Create-form fixtures:** `owned.browserIssue(summary, typeId, { fill, submit })` journals a work item that the journey creates through Jira's own Create form. The run marker ends its summary and the work item is found by it. A failure while filling the form wrote nothing; a failed submit is reconciled by reading, never repeated.

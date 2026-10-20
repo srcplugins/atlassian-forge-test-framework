@@ -1,15 +1,46 @@
 import { activeEnvironment, activeInstallation, activeTarget } from '../core/target.mjs';
 import { test as base, expect } from '../core/playwright.mjs';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { openRun } from './run.mjs';
 import { site, tokenRequest, client } from './client.mjs';
+import { pageGuard } from './guard.mjs';
+
+// The app ID in ./manifest.yml, when the tests run from an app's repository.
+const manifestAppId = () =>
+  existsSync('manifest.yml')
+    ? readFileSync('manifest.yml', 'utf8').match(/app\/([0-9a-f-]{36})/)?.[1]
+    : undefined;
 
 // Playwright fixtures for disposable-fixture journeys. A suite selects its fixture app with
 // test.use({ fixtureApp }), and a registered profile with test.use({ fixtureProfile }); `owned`
-// opens a journaled run and always cleans it up.
+// opens a journaled run and always cleans it up. `pageGuard` watches every test's browser
+// context and fails the test on an undeclared Jira error flag or an app frame that never loads.
 export const test = base.extend({
   fixtureApp: [undefined, { option: true }],
   fixtureProfile: ['standard', { option: true }],
+  expectedFlags: [[], { option: true }],
+  appLoadLimit: [15_000, { option: true }],
+  appIds: [undefined, { option: true }],
+  pageGuard: [
+    async ({ context, expectedFlags, appLoadLimit, appIds }, use, info) => {
+      const ids = appIds ?? [manifestAppId()].filter(Boolean);
+      const guard = await pageGuard(context, {
+        appIds: ids,
+        appLoadLimit,
+        expectedFlags,
+        annotate: (type, description) => info.annotations.push({ type, description }),
+      });
+      await use(guard);
+      try {
+        guard.check();
+      } catch (error) {
+        const [page] = context.pages();
+        await page?.screenshot({ path: info.outputPath('page-guard.png') }).catch(() => {});
+        throw error;
+      }
+    },
+    { auto: true },
+  ],
   jiraRequest: async ({}, use) => {
     const request = await tokenRequest();
     try {
@@ -18,7 +49,11 @@ export const test = base.extend({
       await request.dispose();
     }
   },
-  owned: async ({ context, page, fixtureApp, fixtureProfile, jiraRequest }, use, info) => {
+  owned: async (
+    { context, page, fixtureApp, fixtureProfile, jiraRequest, pageGuard },
+    use,
+    info,
+  ) => {
     if (!fixtureApp) throw Error('Select the fixture app with test.use({ fixtureApp }).');
     expect((await client(context.request)('/myself')).accountId).toBe(
       (await client(jiraRequest)('/myself')).accountId,
@@ -27,8 +62,16 @@ export const test = base.extend({
     owned.run.state.test = info.title;
     owned.run.persist();
     const started = Date.now();
+    // A Create form journey waits for Jira's outcome flag, so a flag that comes only after the
+    // work item exists (fields saved with exceptions) is seen before the journey moves on.
+    const browserIssue = async (...args) => {
+      const since = Date.now();
+      const issue = await owned.browserIssue(...args);
+      await pageGuard.createOutcome({ since });
+      return issue;
+    };
     try {
-      await use(owned);
+      await use({ ...owned, browserIssue });
     } finally {
       owned.run.state.exerciseMs = Date.now() - started;
       owned.run.state.testStatus = info.status;
@@ -48,8 +91,7 @@ export { expect };
  */
 export function installation(app) {
   const target = activeInstallation(app);
-  const appId =
-    target.appId ?? readFileSync('manifest.yml', 'utf8').match(/app\/([0-9a-f-]{36})/)?.[1];
+  const appId = target.appId ?? manifestAppId();
   if (!appId) throw Error('App ID unavailable: set installation appId or run from the app.');
   return { ...target, appId };
 }

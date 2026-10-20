@@ -25,8 +25,32 @@ test('MY-01 a saved setting survives a reload', async ({ page, owned }) => {
 |---|---|
 | `issue(summary, labels?)` | A label-marked disposable work item |
 | `propertyIssue(summary, body, typeId)` | A work item of a chosen work type, marked by a work item property instead of a label |
-| `browserIssue(summary, typeId, { fill, submit })` | A work item created through Jira's own Create form: `fill(summary)` opens and fills the form, `submit()` makes the one click that creates it, the run marker ends the summary, and the Description stays empty. A failure in `fill` wrote nothing and cleans up at once; one in `submit` is reconciled by reading |
+| `browserIssue(summary, typeId, { fill, submit })` | A work item created through Jira's own Create form: `fill(summary)` opens and fills the form, `submit()` makes the one click that creates it, the run marker ends the summary, and the Description stays empty. A failure in `fill` wrote nothing and cleans up at once; one in `submit` is reconciled by reading. It returns once Jira shows the Create outcome flag (up to 20 s), and fails at once if that flag is an error, such as "Created Task with exceptions" ([page guard](#the-page-guard)) |
 | `api`, `project`, `user`, `run` | The Jira client, the fixture space, the account and the journal |
+
+## The page guard
+
+Every test that uses `test` (or `themeTest`) from `/jira` gets the `pageGuard` fixture automatically. It watches every page of the test's browser context and fails the test at its end when either happened, however its own assertions went:
+
+- **Jira showed an error flag.** A flag is Jira's toast (an element with role `alert` and a heading). It's an error when its text contains "with exceptions", "something went wrong", "couldn't", "could not", "unable to", "failed to" or the word "error": for example "Created Story with exceptions: We couldn't save the value of the Agent Prompts field", or "We couldn't load …".
+- **An app never loaded.** While a Forge app loads, Jira shows Forge's skeleton placeholder beside the app's iframe and keeps the iframe hidden. A Custom UI app has loaded once its iframe is visible; a UI Kit app renders into Jira's page beside an iframe that stays hidden, and has loaded once that content shows. A displayed app iframe (its `src` contains the app ID) still behind the skeleton, or still hidden with nothing rendered beside it, after `appLoadLimit` fails the test. Frames in collapsed sections don't count until they're displayed.
+
+A failure names the flag or the frame and saves `page-guard.png` in the test's output directory. Each flag the guard saw is a `jira-flag` annotation in the report, and each app frame's load time an `app-frame-ms` annotation.
+
+| Option (`test.use`) | Default | Use |
+|---|---|---|
+| `expectedFlags` | `[]` | Error flags the tests expect: strings contained in the flag's text, or regular expressions. A declared flag doesn't fail the test; any other error flag still does |
+| `appLoadLimit` | `15000` | Milliseconds an app frame may stay behind the loading placeholder |
+| `appIds` | the app ID in `./manifest.yml` | The app IDs whose frames are checked. Under `forge tunnel`, frames are served from `localhost` and aren't checked |
+
+Inside a test, `pageGuard.allowFlag(pattern)` declares an expected flag for that test only, `pageGuard.flags` lists the flags seen so far, and `pageGuard.check()` fails at once rather than at the end. The guard watches only the test's own context: a page opened in another context with `browser.newContext()` isn't watched.
+
+```js
+test('MY-07 an unreachable service is reported', async ({ page, owned, pageGuard }) => {
+  pageGuard.allowFlag(/^We couldn't reach the service/);
+  // ...
+});
+```
 
 ## Rules the journal enforces
 
