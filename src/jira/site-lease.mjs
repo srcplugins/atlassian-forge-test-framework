@@ -45,6 +45,16 @@ export function siteLease(
   const write = () => api(path, 'PUT', { id, holder, expires: now() + ttl });
   let held = false;
   return {
+    /** This lease's identifier, which a suite passes to its steps as FORGE_TEST_LEASE. */
+    id,
+    /**
+     * Read-only: the label of a live lease held by someone else, or null when the site is free,
+     * the lease expired, or `own` (a suite's lease ID) holds it.
+     */
+    async heldByOther(own) {
+      const current = await read();
+      return current && current.id !== own && current.expires > now() ? current.holder : null;
+    },
     async acquire() {
       const owned = await api(`/project/${project.key}`);
       if (!isMarker(owned?.description, project.marker))

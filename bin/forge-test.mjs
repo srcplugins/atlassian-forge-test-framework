@@ -67,7 +67,7 @@ try {
       const split = args.indexOf('--');
       const own = split < 0 ? args : args.slice(0, split);
       const configFile = option(own, '--config') ?? 'playwright.config.mjs';
-      process.exitCode = lane(own[0], split < 0 ? [] : args.slice(split + 1), { configFile });
+      process.exitCode = await lane(own[0], split < 0 ? [] : args.slice(split + 1), { configFile });
       break;
     }
     case 'suite': {

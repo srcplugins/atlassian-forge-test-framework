@@ -1,4 +1,5 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
@@ -59,6 +60,8 @@ export async function runSuite(
     before = () => {},
     fixturesClean = () => false,
     runId = randomUUID,
+    receipt,
+    now = () => new Date(),
   } = {},
 ) {
   const results = [];
@@ -76,9 +79,15 @@ export async function runSuite(
     console.log(`\n=== ${s.name}`);
     const id = runId();
     const stepEnv = { ...env, ...s.env, FORGE_TEST_RUN_ID: id };
+    const startedAt = now().toISOString();
     const started = performance.now();
     const code = await exitCode(s.command[0], s.command.slice(1), { cwd, env: stepEnv });
-    const result = { ok: code === 0, seconds: (performance.now() - started) / 1000 };
+    const result = {
+      ok: code === 0,
+      seconds: (performance.now() - started) / 1000,
+      started: startedAt,
+      finished: now().toISOString(),
+    };
     results.push(result);
     if (result.ok) continue;
     if (s.prerequisite || !s.cleanup) break;
@@ -105,5 +114,34 @@ export async function runSuite(
   ];
   console.log(`\n${lines.join('\n')}`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
-  return results.length === steps.length && results.every((r) => r.ok);
+  const passed = results.length === steps.length && results.every((r) => r.ok);
+  if (receipt) writeReceipt(receipt, { title, cwd, passed, steps, results });
+  return passed;
+}
+
+/**
+ * Records the run as JSON for measuring first-pass rates and repair time: the suite, the
+ * directory it ran in, and each step's outcome and times. Names and timings only, like the
+ * summary. A receipt that can't be written is reported and doesn't change the result.
+ */
+function writeReceipt(file, { title, cwd, passed, steps, results }) {
+  const outcome = (r) =>
+    !r ? 'not run' : r.ok ? 'passed' : r.settled ? 'failed, cleaned up' : 'failed';
+  const record = {
+    schemaVersion: 1,
+    suite: title,
+    directory: basename(cwd),
+    ok: passed,
+    steps: steps.map((s, i) => ({
+      name: s.name,
+      outcome: outcome(results[i]),
+      ...(results[i] ? { started: results[i].started, finished: results[i].finished } : {}),
+    })),
+  };
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
+  } catch {
+    console.error('Could not write the suite receipt.');
+  }
 }

@@ -50,9 +50,11 @@ function transport({ app = 'forge-sandbox', key = 'SBOX', description } = {}) {
       else if (path.includes('/project/')) body = data.project;
       else if (path.endsWith('/comment'))
         body = { comments: data.comments, total: data.comments.length };
-      else if (path.endsWith('/changelog'))
-        body = { values: data.changelogs.get(id) ?? [], isLast: true };
-      else if (path.endsWith('/search/jql'))
+      else if (path.endsWith('/changelog')) {
+        // An array is a complete history; { values, isLast } sets the page as given.
+        const history = data.changelogs.get(id) ?? [];
+        body = Array.isArray(history) ? { values: history, isLast: true } : history;
+      } else if (path.endsWith('/search/jql'))
         body = { issues: [...data.issues.values()], isLast: true };
       else if (path.includes('/properties/')) {
         const value = data.issues.get(id)?.properties[decodeURIComponent(path.split('/').at(-1))];
@@ -537,7 +539,7 @@ test('an unrecorded custom field value is cleaned up only when the run alone cha
     t.data.issue.fields.customfield_1 = null;
     const started = Date.parse(f.run.state.started);
     for (const history of [
-      [],
+      { values: [], isLast: false },
       changed('someone-else', started + 1),
       changed('test-owner', started - 60000),
     ]) {
@@ -562,6 +564,37 @@ test('an unrecorded custom field value is cleaned up only when the run alone cha
     await resumed.cleanup();
     assert.equal(t.deletes, 1);
     assert.equal(resumed.run.state.status, 'clean');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an intended custom field save that never happened leaves a fixture cleanable as created', async () => {
+  // atlassian-forge-test-framework#vaf4: AP-18 recorded the field it was about to save, then failed
+  // before saving; the work item stayed exactly as created, with no history at all.
+  const directory = mkdtempSync(join(tmpdir(), 'fixture-'));
+  const t = transport();
+  try {
+    const f = await openRun(t.request, 'forge-sandbox', { directory });
+    await f.issue('synthetic');
+    const entry = f.run.state.resources[0];
+    entry.expected.customField = { id: 'customfield_1', value: ['SBOX-1'] };
+    f.run.persist();
+    t.data.issue.fields.customfield_1 = null;
+    t.data.changelogs.set(entry.id, []);
+    // Empty history doesn't excuse anything else: a changed Description still refuses.
+    const description = t.data.issue.fields.description;
+    t.data.issue.fields.description = {
+      type: 'doc',
+      version: 1,
+      content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Edited elsewhere' }] }],
+    };
+    await assert.rejects(() => f.cleanup(), /incomplete/);
+    assert.equal(t.deletes, 0);
+    t.data.issue.fields.description = description;
+    await f.cleanup();
+    assert.equal(t.deletes, 1);
+    assert.equal(f.run.state.status, 'clean');
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
