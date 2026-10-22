@@ -146,3 +146,17 @@ test('the lease is written only to a marked fixture space', async () => {
   await assert.rejects(() => s.lease('repo-a').acquire(), /not a marked fixture space/);
   assert.equal(s.writes, 0);
 });
+
+test('a lane sees a live lease held by someone else, never its own suite’s, without writing', async () => {
+  const s = site();
+  const lane = s.lease('a lane');
+  assert.equal(await lane.heldByOther(), null);
+  const suite = s.lease('org/plugin run 7');
+  await suite.acquire();
+  const writes = s.writes;
+  assert.equal(await lane.heldByOther(), 'org/plugin run 7');
+  assert.equal(await lane.heldByOther(suite.id), null);
+  s.clock += 16 * 60_000;
+  assert.equal(await lane.heldByOther(), null);
+  assert.equal(s.writes, writes);
+});

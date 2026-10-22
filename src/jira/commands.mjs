@@ -33,6 +33,7 @@ import { runSuite } from '../core/suite.mjs';
  * next step or cleanup.
  */
 export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
+  checkSessions(activeTarget().authDirectory);
   const { GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: run } = process.env;
   const lease = siteLease(client(await tokenRequest()), {
     holder: repository ? `${repository} run ${run}` : 'a local run',
@@ -47,11 +48,14 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
   const timer = setInterval(renew, renewEvery);
   try {
     return await runSuite(title, steps, {
+      // Its lanes run under this lease instead of waiting for it.
+      env: { ...process.env, FORGE_TEST_LEASE: lease.id },
       before: async () => {
         await renew();
         if (lost) throw lost;
       },
       fixturesClean: () => fixturesClean(),
+      receipt: suiteReceipt(title),
     });
   } finally {
     clearInterval(timer);
@@ -62,6 +66,13 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
       .catch(() => console.error('Could not release the site lease; it expires on its own.'));
   }
 }
+
+/** Where a suite run's receipt goes: the site's private state, one file per run. */
+export const suiteReceipt = (title, at = new Date(), directory = activeTarget().directory) =>
+  `${directory}/suites/${title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')}-${at.toISOString().replaceAll(':', '-')}-${process.pid}.json`;
 
 /** Whether every fixture journal on the site under test is clean (none active or left over). */
 export function fixturesClean(directory = activeTarget().runs) {
@@ -236,11 +247,27 @@ export async function cleanup(app, runId) {
   }
 }
 
+/** The holder of another live site lease, read-only; a suite's own lanes pass its lease ID. */
+async function siteLeaseHolder(env) {
+  const request = await tokenRequest();
+  try {
+    return await siteLease(client(request), { holder: 'a lane' }).heldByOther(env.FORGE_TEST_LEASE);
+  } finally {
+    await request.dispose();
+  }
+}
+
 /**
- * Runs one browser lane with the consumer's Playwright configuration. The lane's opt-ins and the
- * site's expiry are checked first, so a refusal happens before Playwright starts.
+ * Runs one browser lane with the consumer's Playwright configuration. The lane's opt-ins, the
+ * site's expiry, the saved sessions and the site lease are checked first, so a refusal happens
+ * before Playwright starts. A lane outside a suite doesn't take the lease, but never starts while
+ * a suite holds it, since its fixtures would share the suite's spaces.
  */
-export function lane(name, extra = [], { configFile = 'playwright.config.mjs' } = {}) {
+export async function lane(
+  name,
+  extra = [],
+  { configFile = 'playwright.config.mjs', holder = siteLeaseHolder } = {},
+) {
   if (!Object.hasOwn(lanes, name ?? ''))
     throw Error(`Usage: forge-test lane <${Object.keys(lanes).join('|')}> [-- Playwright args]`);
   const env = { ...process.env, E2E_LANE: name };
@@ -250,6 +277,9 @@ export function lane(name, extra = [], { configFile = 'playwright.config.mjs' } 
   if (days !== null && days < 0) throw Error(`The site under test expired ${-days} day(s) ago.`);
   if (days !== null && days <= 30)
     console.warn(`WARNING: the site under test expires in ${days} day(s).`);
+  checkSessions(browserTarget(host).authDirectory, { env });
+  const busy = await holder(env);
+  if (busy) throw Error(`The site is in use by ${busy}; run the lane when it finishes.`);
   const cli = createRequire(resolve('package.json')).resolve('@playwright/test/cli');
   const result = spawnSync(
     process.execPath,
@@ -269,12 +299,68 @@ function sessionSecret(file) {
   // Local storage is optional for authentication; cookies alone carry the session.
   if (value.length > limit) value = packed(JSON.stringify({ ...state, origins: [] }));
   if (value.length > limit) throw Error(`A saved session is too large for a GitHub secret.`);
-  const expiries = state.cookies
+  return { value, expires: sessionExpiry(state) };
+}
+
+/** When a saved session's Atlassian sign-in lapses, or null when it records no expiry. */
+function sessionExpiry(state) {
+  const expiries = (state.cookies ?? [])
     .filter(
       (c) => ['cloud.session.token', 'tenant.session.token'].includes(c.name) && c.expires > 0,
     )
     .map((c) => c.expires * 1000);
-  return { value, expires: expiries.length ? new Date(Math.min(...expiries)) : null };
+  return expiries.length ? new Date(Math.min(...expiries)) : null;
+}
+
+const renewWithin = 7; // days
+const day = (date) => date.toISOString().slice(0, 10);
+
+/**
+ * Checks every saved session in `directory` before a run signs in with them, so a lapsed sign-in
+ * never shows up as a failing test: an expired session refuses the run, and one expiring within a
+ * week warns (as an annotation on a GitHub runner, so it shows on the run's summary). Prints
+ * profile names and dates only. Returns each profile's expiry.
+ */
+export function checkSessions(
+  directory,
+  { now = new Date(), env = process.env, warn = console.warn } = {},
+) {
+  if (!existsSync(directory)) return [];
+  const sessions = readdirSync(directory)
+    .filter((name) => /^[\w-]+\.json$/.test(name))
+    .sort()
+    .map((name) => {
+      let expires = null;
+      try {
+        expires = sessionExpiry(JSON.parse(readFileSync(`${directory}/${name}`, 'utf8')));
+      } catch {
+        // An unreadable file is reported by the browser that loads it.
+      }
+      return { profile: name.slice(0, -'.json'.length), expires };
+    });
+  const ci = !!env.GITHUB_ACTIONS;
+  const renew = (profile) =>
+    ci
+      ? `run forge-test login ${profile} on the machine that keeps the sessions, then forge-test secrets`
+      : `run forge-test login ${profile}`;
+  const expired = sessions.filter((s) => s.expires && s.expires <= now);
+  if (expired.length)
+    throw Error(
+      expired
+        .map(
+          (s) =>
+            `The saved ${s.profile} session expired on ${day(s.expires)}; ${renew(s.profile)}.`,
+        )
+        .join('\n'),
+    );
+  for (const { profile, expires } of sessions) {
+    const days = expires && Math.floor((expires - now) / 86_400_000);
+    if (expires && days < renewWithin) {
+      const message = `The saved ${profile} session expires in ${days} day(s), on ${day(expires)}; ${renew(profile)}.`;
+      warn(ci ? `::warning title=Saved session expiring::${message}` : `WARNING: ${message}`);
+    }
+  }
+  return sessions;
 }
 
 /**
@@ -299,6 +385,10 @@ export function secrets({ repo, environment, profiles, dryRun }) {
     if (!existsSync(file))
       throw Error(`Missing ${profile} session; run forge-test login ${profile}.`);
     const { value, expires } = sessionSecret(file);
+    if (expires && expires <= new Date())
+      throw Error(
+        `The saved ${profile} session expired on ${day(expires)}; run forge-test login ${profile}.`,
+      );
     list.push({
       name: secretName(profile),
       value,
@@ -346,6 +436,7 @@ export function restore(env = process.env) {
     });
   if (!sessions) throw Error('No saved sessions in the environment.');
   console.log(`Restored ${sessions} session(s) for the primary site.`);
+  checkSessions(target.authDirectory, { env });
 }
 
 /**

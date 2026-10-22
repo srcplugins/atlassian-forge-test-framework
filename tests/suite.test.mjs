@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSuite, selectSteps } from '../src/core/suite.mjs';
-import { fixturesClean } from '../src/jira/commands.mjs';
+import { fixturesClean, suiteReceipt } from '../src/jira/commands.mjs';
 
 // Each step appends "<name> <run id>" to a log; `exit` sets its exit code.
 const node = (script) => [process.execPath, '-e', script];
@@ -136,4 +136,47 @@ test('a lost lease stops the suite before the next cleanup', async () => {
   } finally {
     h.done();
   }
+});
+
+test('a receipt records each step outcome and times, and a skipped one as not run', async () => {
+  const h = harness();
+  try {
+    const file = join(h.dir, 'suites', 'receipt.json');
+    let tick = 0;
+    const ok = await h.run(
+      [
+        { name: 'deploy', command: logStep(h.log, 'deploy'), prerequisite: true },
+        { name: 'journeys', command: logStep(h.log, 'journeys', 1), cleanup: node('') },
+        { name: 'runner', command: logStep(h.log, 'runner', 1) },
+        { name: 'after', command: logStep(h.log, 'after') },
+      ],
+      { cwd: h.dir, receipt: file, now: () => new Date(Date.UTC(2026, 9, 22, 0, 0, tick++)) },
+    );
+    assert.equal(ok, false);
+    const receipt = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(receipt.ok, false);
+    assert.equal(receipt.suite, 'test suite');
+    assert.match(receipt.directory, /^suite-/);
+    assert.deepEqual(
+      receipt.steps.map((s) => [s.name, s.outcome, s.started, s.finished]),
+      [
+        ['deploy', 'passed', '2026-10-22T00:00:00.000Z', '2026-10-22T00:00:01.000Z'],
+        ['journeys', 'failed, cleaned up', '2026-10-22T00:00:02.000Z', '2026-10-22T00:00:03.000Z'],
+        ['runner', 'failed', '2026-10-22T00:00:04.000Z', '2026-10-22T00:00:05.000Z'],
+        ['after', 'not run', undefined, undefined],
+      ],
+    );
+    // Names and timings only: no output, environment or run IDs.
+    assert.doesNotMatch(readFileSync(file, 'utf8'), /run-\d|PATH/);
+  } finally {
+    h.done();
+  }
+});
+
+test('receipt files are named by suite, time and process, inside the site state', () => {
+  const at = new Date(Date.UTC(2026, 9, 22, 1, 2, 3, 4));
+  assert.equal(
+    suiteReceipt('features suite (only AP-17)', at, '/state/e2e'),
+    `/state/e2e/suites/features-suite-only-ap-17-2026-10-22T01-02-03.004Z-${process.pid}.json`,
+  );
 });
