@@ -4,6 +4,7 @@
 
 - **Saved sessions:** `lane`, `suite` and `restore` refuse to run with an expired saved session and name the profile to renew with `forge-test login`; one expiring within a week warns (a GitHub annotation on a runner). `secrets` refuses to copy an expired session.
 - **Lanes and the site lease:** `forge-test lane` refuses to start while another run holds the site lease and names that run, so a local lane can't share fixture spaces with a running suite. A suite's own lanes run under its lease.
+- **Cleanup:** a fixture whose recorded custom field value differs is cleaned up when Jira's history shows no change since the create, as when a journey recorded a save and failed before making it. Before, cleanup refused it and the run's journal stayed unresolved.
 - **Suite receipts:** every `forge-test suite` run writes a JSON receipt (suite, directory, result, and each step's outcome and times) to `sites/<host>/e2e/suites/` in the private state, for measuring first-pass rates and repair time.
 - **Page guard:** every test from `/jira` fails when Jira shows an error flag the test didn't declare ("Created Story with exceptions", "Something went wrong", "We couldn't load …") or when an app frame stays behind Jira's loading placeholder for longer than `appLoadLimit` (15 s). Declare expected flags with `test.use({ expectedFlags })` or `pageGuard.allowFlag(pattern)`.
 - **Create-form fixtures:** `owned.browserIssue` returns once Jira shows the Create outcome flag, and fails at once if it's an error, so a field that Jira couldn't save after the create fails the test.

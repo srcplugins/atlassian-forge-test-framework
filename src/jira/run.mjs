@@ -202,7 +202,11 @@ export async function openRun(
         } catch (error) {
           // A save can land after its test stopped and before it recorded the new value. The field
           // is still the run's own while nothing but this run's account changed the work item.
-          if (!(await changedOnlyByRun(entry.id))) throw error;
+          // A save the journey intended but never made leaves Jira's history empty: nothing has
+          // changed the work item since the run created it, so the field holds its created value.
+          // The other checks still apply to both.
+          if (!(await changedOnlyByRun(entry.id)) && !(await unchangedSinceCreate(entry.id)))
+            throw error;
         }
       }
       if (x.fields.subtasks?.length || x.fields.attachment?.length || x.fields.issuelinks?.length)
