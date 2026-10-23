@@ -25,6 +25,9 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
     await page.getByRole('searchbox', { name: 'Search agents', exact: true }).fill(agent);
     const choices = page.getByRole('button', { name: `Chat with ${agent}`, exact: true });
     await expect(choices.first()).toBeVisible();
+    // The gallery fills in as results arrive: one of two same-named agents shows first, the
+    // other a moment later. Count only once the list holds steady.
+    await settledCount(choices);
     return choices;
   };
   const select = async (choices, index) => {
@@ -84,6 +87,26 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
   expect(selected).toBeGreaterThanOrEqual(0);
   await select(choices, selected);
   expect(inventory.matches(await askRovo(page, inventory.prompt))).toBe(true);
+}
+/**
+ * Waits until a locator's count is the same on two reads `poll.intervals` apart, and returns it.
+ * `poll` overrides the wait (Playwright expect.poll timeout/intervals) for offline tests.
+ */
+export async function settledCount(locator, poll = { timeout: 15000, intervals: [1500] }) {
+  let last = -1;
+  let count;
+  await expect
+    .poll(
+      async () => {
+        count = await locator.count();
+        const steady = count === last;
+        last = count;
+        return steady;
+      },
+      { ...poll, message: 'The agent gallery kept changing' },
+    )
+    .toBe(true);
+  return count;
 }
 const rovoComposer = (page) =>
   page.getByRole('textbox').and(page.locator('[contenteditable="true"]'));

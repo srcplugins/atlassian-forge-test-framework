@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { copyAgentProfile } from '../src/core/rovo.mjs';
+import { copyAgentProfile, settledCount } from '../src/core/rovo.mjs';
 // Offline polling: tight intervals, but a generous budget so a loaded machine can't
 // fail the passing cases; only the timeout case uses the short budget. The hosted
 // journey keeps the default five-second wait.
@@ -62,4 +62,19 @@ test('agent copy times out without retrying the click or accepting the old clipb
     /Copy link did not complete/,
   );
   assert.equal(fixture.counts().clicks, 1);
+});
+
+// The gallery shows one of two same-named agents before the other arrives.
+test('the agent count is read once the gallery holds steady', async () => {
+  const counts = [1, 2, 2];
+  let reads = 0;
+  const locator = { count: async () => counts[Math.min(reads++, counts.length - 1)] };
+  assert.equal(await settledCount(locator, poll), 2);
+  assert.equal(reads, 3);
+});
+
+test('a gallery that keeps changing fails instead of being counted', async () => {
+  let reads = 0;
+  const locator = { count: async () => reads++ };
+  await assert.rejects(settledCount(locator, expire), /agent gallery kept changing/);
 });
