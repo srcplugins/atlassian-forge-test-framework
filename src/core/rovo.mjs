@@ -22,11 +22,20 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
     }).toPass({ timeout: 60000, intervals: [1000, 3000] });
     await menu.click();
     await page.getByText('View all agents', { exact: true }).click();
+    // The gallery first filters the agents it already loaded, which can hold one of two
+    // same-named agents (development and production), and only its server search lists them
+    // all, a second or more later. Count once that search has answered and the list holds steady.
+    const searched = page
+      .waitForResponse((response) => isAgentSearch(response.request(), agent), {
+        timeout: 45000,
+      })
+      .catch(() => {
+        throw Error(`The agent gallery's search for ${agent} never answered`);
+      });
     await page.getByRole('searchbox', { name: 'Search agents', exact: true }).fill(agent);
+    await searched;
     const choices = page.getByRole('button', { name: `Chat with ${agent}`, exact: true });
     await expect(choices.first()).toBeVisible();
-    // The gallery fills in as results arrive: one of two same-named agents shows first, the
-    // other a moment later. Count only once the list holds steady.
     await settledCount(choices);
     return choices;
   };
@@ -87,6 +96,28 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
   expect(selected).toBeGreaterThanOrEqual(0);
   await select(choices, selected);
   expect(inventory.matches(await askRovo(page, inventory.prompt))).toBe(true);
+}
+/**
+ * Whether a request is the agent gallery's server search for `agent`: a Jira GraphQL query whose
+ * variables (in the URL for a persisted query, else in the body) search by that exact name.
+ */
+export function isAgentSearch(request, agent) {
+  let url;
+  try {
+    url = new URL(request.url());
+  } catch {
+    return false;
+  }
+  if (!url.pathname.startsWith('/gateway/api/graphql')) return false;
+  let variables;
+  try {
+    variables = url.searchParams.has('variables')
+      ? JSON.parse(url.searchParams.get('variables'))
+      : request.postDataJSON()?.variables;
+  } catch {
+    return false;
+  }
+  return variables?.input?.name === agent;
 }
 /**
  * Waits until a locator's count is the same on two reads `poll.intervals` apart, and returns it.
