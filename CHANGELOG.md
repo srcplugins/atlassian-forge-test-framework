@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Rovo agent selection:** `openRovoChat` counts the gallery's matching agents only once the list holds steady. Jira shows one of two same-named agents (a development and a production installation) before the other, so the count read 1 and the chat could open the wrong installation's agent without the inventory check.
+- **Rovo agent selection:** `openRovoChat` counts the gallery's matching agents only after the gallery's server search for the agent's name has answered and the list holds steady. Jira first filters the agents it already loaded, which can hold one of two same-named agents (a development and a production installation), and lists the other only when its search answers, a second or more later. The count read 1, so the chat could open the wrong installation's agent without the inventory check. `isAgentSearch(request, agent)` recognizes that search.
 - **Saved sessions:** `lane`, `suite` and `restore` refuse to run with an expired saved session and name the profile to renew with `forge-test login`; one expiring within a week warns (a GitHub annotation on a runner). `secrets` refuses to copy an expired session.
 - **Lanes and the site lease:** `forge-test lane` refuses to start while another run holds the site lease and names that run, so a local lane can't share fixture spaces with a running suite. A suite's own lanes run under its lease.
 - **Cleanup:** a fixture whose recorded custom field value differs is cleaned up when Jira's history shows no change since the create, as when a journey recorded a save and failed before making it. Before, cleanup refused it and the run's journal stayed unresolved.

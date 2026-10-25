@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { copyAgentProfile, settledCount } from '../src/core/rovo.mjs';
+import { copyAgentProfile, isAgentSearch, settledCount } from '../src/core/rovo.mjs';
 // Offline polling: tight intervals, but a generous budget so a loaded machine can't
 // fail the passing cases; only the timeout case uses the short budget. The hosted
 // journey keeps the default five-second wait.
@@ -77,4 +77,27 @@ test('a gallery that keeps changing fails instead of being counted', async () =>
   let reads = 0;
   const locator = { count: async () => reads++ };
   await assert.rejects(settledCount(locator, expire), /agent gallery kept changing/);
+});
+
+// Only the gallery's server search for the exact name lists every same-named agent.
+test('the agent search is recognized only for the exact name', () => {
+  const site = 'https://jira.test';
+  const request = (url, body) => ({ url: () => url, postDataJSON: () => body ?? null });
+  const persisted = (variables) =>
+    request(
+      `${site}/gateway/api/graphql/pq/abc?variables=${encodeURIComponent(JSON.stringify(variables))}`,
+    );
+  const agent = 'Agent Prompts Assistant';
+  assert.equal(isAgentSearch(persisted({ input: { name: agent } }), agent), true);
+  const body = { variables: { input: { name: agent } } };
+  assert.equal(isAgentSearch(request(`${site}/gateway/api/graphql`, body), agent), true);
+  // The gallery's first load (no search), a partial name, another path and unreadable input.
+  assert.equal(isAgentSearch(persisted({ input: null, first: 30 }), agent), false);
+  assert.equal(isAgentSearch(persisted({ input: { name: 'Agent Prompts' } }), agent), false);
+  assert.equal(isAgentSearch(request(`${site}/rest/api/3/search`, body), agent), false);
+  assert.equal(
+    isAgentSearch(request(`${site}/gateway/api/graphql/pq/abc?variables={`), agent),
+    false,
+  );
+  assert.equal(isAgentSearch(request('not a url'), agent), false);
 });
