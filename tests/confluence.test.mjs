@@ -28,7 +28,7 @@ test('Confluence requires independently recorded product access and isolates pri
   enable();
   assert.match(
     confluenceTarget().runs,
-    /products\/confluence\/sites\/confluence-example.atlassian.net\/e2e\/runs$/,
+    /products\/confluence\/sites\/confluence-example\.atlassian\.net\/e2e\/runs$/,
   );
   assert.throws(() => confluenceTarget('other-example.atlassian.net'), /Verified owned/);
 });
