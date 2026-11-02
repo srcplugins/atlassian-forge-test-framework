@@ -44,6 +44,7 @@ The first match wins:
 | `sites` | The only sites any command will touch, by role. `primary` is the default. `expiresOn` makes lanes refuse an expired site and warn within 30 days |
 | `installations` | Forge installations by app, site and environment. The environment ID locates the app's frames and pages: run `forge environments list` in the app's directory and copy that environment's Environment ID. It's also the UUID after the app ID in the address of the app's pages in Jira. `appId` is optional; without it, the app ID is read from `./manifest.yml` |
 | `fixtures.apps` | The disposable fixture space for each fixture app (`forge-test prepare` creates or verifies them) |
+| `fixtures.confluenceSpaces` | A Confluence app's marked fixture space key, by app slug ([Confluence](confluence.md#fixtures)) |
 | `fixtures.projects` | Other named spaces, for example one used by a registered fixture profile |
 | `fixtures.identity` | The space whose isolated permission scheme holds the pinned identity accounts ([set up by hand](#identity-fixture)). It also holds the site lease that `forge-test suite` takes |
 | `fixtures.landing` | The work item `forge-test login` opens (required by `login`). Without `fixtures.identity`, its space holds the site lease |
@@ -113,3 +114,7 @@ Sessions, run journals, locks and reports live under `.local/` in the current di
 | `sites/<host>/e2e/identity-fixture.json` | Pinned identity accounts, when used |
 
 Never commit any of it. Never copy sessions between sites or profiles.
+
+## Confluence product access
+
+For independently verified Confluence sites, add `products: ['confluence']` (or `['jira', 'confluence']`) to the site record. Existing Jira configurations may omit it. This declaration alone does not verify a product plan or permissions; the owner must establish those first. The [Confluence helpers](confluence.md) keep their sessions and journals separate and do not enable Jira CLI commands for Confluence.

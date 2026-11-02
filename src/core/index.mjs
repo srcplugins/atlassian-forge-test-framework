@@ -11,9 +11,10 @@ export {
   identityProjectKey,
   landingIssue,
   installationTargets,
+  confluenceSpaceKey,
 } from './config.mjs';
 export { atlassianCredentials, jiraConfig, apiSite } from './credentials.mjs';
-export { safeRequest } from './safe-request.mjs';
+export { safeRequest, retryRead } from './safe-request.mjs';
 export {
   browserTarget,
   activeTarget,
@@ -32,4 +33,4 @@ export {
 export { FixtureRun } from './run-journal.mjs';
 export { lanes, selectedLanes, laneProject, definePlaywrightConfig } from './lanes.mjs';
 export { installOptions, installedOn, installArguments } from './forge-install.mjs';
-export { listSuite, runSuite, selectSteps } from './suite.mjs';
+export { listSuite, runSuite, selectSteps, recordStepResult } from './suite.mjs';

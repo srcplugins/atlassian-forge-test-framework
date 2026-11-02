@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pageGuard } from '../src/jira/guard.mjs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import './support/config.mjs';
+import { definePlaywrightConfig } from '../src/core/lanes.mjs';
+import { defaultAppLoadLimit, frameStage, guardTest } from '../src/core/page-guard.mjs';
+import { appReady, pageGuard, readinessStages } from '../src/jira/guard.mjs';
 
 const appId = '0b1c2d3e-4f50-4617-8899-aabbccddeeff';
 const otherApp = 'ffeeddcc-bbaa-4998-8716-5f4e3d2c1b0a';
@@ -14,8 +20,9 @@ async function harness(options = {}) {
   context.exposeBinding = async (name, fn) => {
     context.binding = { name, fn };
   };
-  context.addInitScript = async (script, arg) => {
-    context.script = { source: String(script), arg };
+  context.addInitScript = async (script) => {
+    assert.equal(typeof script, 'string');
+    context.script = script;
   };
   const guard = await pageGuard(context, {
     appIds: [appId],
@@ -23,8 +30,13 @@ async function harness(options = {}) {
     ...options,
   });
   const page = ({ top = true } = {}) => {
-    const p = { alerts: [], frames: [], now: 0 };
-    const window = {};
+    const p = { alerts: [], frames: [], now: 0, loads: [] };
+    const window = {
+      addEventListener: (type, fn, capture) => {
+        assert.deepEqual([type, capture], ['load', true]);
+        p.loads.push(fn);
+      },
+    };
     window.top = top ? window : {};
     window[context.binding.name] = async (event) => context.binding.fn({}, event);
     const document = {
@@ -41,16 +53,17 @@ async function harness(options = {}) {
       'getComputedStyle',
       'setInterval',
       'performance',
-      'arg',
-      `(${context.script.source})(arg)`,
-    )(
-      window,
-      document,
-      (el) => ({ visibility: el.visibility }),
-      setInterval,
-      { now: () => p.now },
-      context.script.arg,
-    );
+      context.script,
+    )(window, document, (el) => ({ visibility: el.visibility }), setInterval, {
+      now: () => p.now,
+    });
+    // Playwright's page.evaluate, run against this page's window.
+    p.context = () => context;
+    p.evaluate = async (fn, arg) => new Function('window', `return (${fn})`)(window)(arg);
+    // The browser's load event for a frame's document.
+    p.load = (frame) => {
+      for (const fn of p.loads) fn({ target: frame });
+    };
     // Advances the clock in 200 ms steps, as the page's interval would.
     p.advance = async (ms) => {
       for (let t = 0; t < ms; t += 200) {
@@ -69,8 +82,8 @@ async function harness(options = {}) {
     };
     // An app frame in Forge's wrapper. A loading app has Forge's skeleton beside a hidden frame;
     // a loaded Custom UI app's frame is visible, and a loaded UI Kit app renders `content` beside
-    // a frame that stays hidden.
-    p.frame = (id, { title = 'Agent Prompts', displayed = true } = {}) => {
+    // a frame that stays hidden. Its document has loaded unless `loaded` is false.
+    p.frame = (id, { title = 'Agent Prompts', displayed = true, loaded = true } = {}) => {
       const box = (height, matches = () => false) => ({
         contains: () => false,
         matches,
@@ -91,6 +104,7 @@ async function harness(options = {}) {
           s === '[data-testid^="forgeskeleton"]' && frame.skeleton ? skeleton : null,
       };
       const frame = {
+        tagName: 'IFRAME',
         src: frameSrc(id),
         title,
         visibility: 'hidden',
@@ -106,6 +120,7 @@ async function harness(options = {}) {
           })[s] ?? null,
       };
       p.frames.push(frame);
+      if (loaded) p.load(frame);
       return frame;
     };
     return p;
@@ -211,8 +226,9 @@ test('an app frame still behind the placeholder after the limit fails the test',
     () => guard.check(),
     (error) =>
       error.category === 'page-guard' &&
+      error.stage === 'placeholder' &&
       error.message ===
-        `The app frame "Agent Prompts" stayed behind Jira's loading placeholder for more than 15 s.`,
+        `The app frame "Agent Prompts" was not ready after 15 s: it stayed behind Jira's loading placeholder.`,
   );
 });
 
@@ -241,15 +257,18 @@ test('a UI Kit app that renders beside its hidden frame has loaded', async () =>
 });
 
 test('without the skeleton, a hidden frame with nothing rendered beside it is still loading', async () => {
-  for (const change of [
-    (frame) => (frame.skeleton = false),
-    (frame) => (frame.visibility = 'visible'),
+  for (const [change, stage, text] of [
+    [(frame) => (frame.skeleton = false), 'root', /never rendered its root/],
+    [(frame) => (frame.visibility = 'visible'), 'placeholder', /behind Jira's loading placeholder/],
   ]) {
     const { guard, page } = await harness({ appLoadLimit: 15_000 });
     const p = page();
     change(p.frame(appId));
     await p.advance(15_400);
-    assert.throws(() => guard.check(), /stayed behind Jira's loading placeholder/);
+    assert.throws(
+      () => guard.check(),
+      (error) => error.stage === stage && text.test(error.message),
+    );
   }
 });
 
@@ -270,7 +289,8 @@ test('an undisplayed frame, another app’s frame or a removed frame never fails
   assert.doesNotThrow(() => guard.check());
   await p.advance(400);
   assert.throws(() => guard.check());
-  assert.deepEqual(annotations, []);
+  // Only the collapsed frame, once displayed, was ever not ready.
+  assert.deepEqual(annotations, [{ type: 'app-readiness', description: 'placeholder' }]);
 });
 
 test('each problem is reported once', async () => {
@@ -320,6 +340,189 @@ test("Create's outcome: a success flag returns, exceptions fail at once, none fa
 test('the options are checked', async () => {
   await assert.rejects(harness({ expectedFlags: [42] }), /string or a regular expression/);
   await assert.rejects(harness({ appLoadLimit: 0 }), /positive number/);
+  // The default bound is the default assertion timeout of the framework's Playwright lanes.
+  assert.equal(defaultAppLoadLimit, 30_000);
+  assert.equal(definePlaywrightConfig({ testDir: 't' }, {}).expect.timeout, defaultAppLoadLimit);
   const { guard } = await harness();
   assert.throws(() => guard.allowFlag({}), /string or a regular expression/);
+});
+
+test('a frame’s stage is the first readiness stage it hasn’t passed', () => {
+  assert.deepEqual(readinessStages, ['attached', 'document', 'placeholder', 'root']);
+  const seen = {
+    displayed: true,
+    loaded: true,
+    placeholder: false,
+    visible: false,
+    rendered: false,
+  };
+  for (const [observed, stage] of [
+    [{ displayed: false }, 'undisplayed'],
+    [{ loaded: false, placeholder: true }, 'document'],
+    [{ placeholder: true }, 'placeholder'],
+    [{ placeholder: true, visible: true }, 'placeholder'],
+    [{}, 'root'],
+    [{ loaded: false }, 'document'],
+    [{ visible: true }, 'ready'],
+    [{ rendered: true }, 'ready'],
+    // A frame whose load event was missed but which shows its root is ready all the same.
+    [{ loaded: false, visible: true }, 'ready'],
+  ])
+    assert.equal(frameStage({ ...seen, ...observed }), stage, JSON.stringify(observed));
+});
+
+test('a stuck frame names the stage it failed at, in the error, the report and the guard', async () => {
+  for (const [setup, stage, text] of [
+    [(p) => p.frame(appId, { loaded: false }), 'document', "its document didn't finish loading"],
+    [(p) => p.frame(appId), 'placeholder', "it stayed behind Jira's loading placeholder"],
+    [
+      (p) => (p.frame(appId).skeleton = false),
+      'root',
+      'the app never rendered its root (the frame stayed hidden with nothing rendered beside it)',
+    ],
+  ]) {
+    const { guard, annotations, page } = await harness({ appLoadLimit: 2000 });
+    const p = page();
+    setup(p);
+    await p.advance(2400);
+    assert.throws(
+      () => guard.check(),
+      (error) =>
+        error.stage === stage &&
+        error.message === `The app frame "Agent Prompts" was not ready after 2 s: ${text}.`,
+    );
+    assert.deepEqual(annotations, [{ type: 'app-readiness', description: stage }]);
+    assert.deepEqual(
+      guard.readiness.map((r) => [r.title, r.stage]),
+      [['Agent Prompts', stage]],
+    );
+  }
+});
+
+test('a frame that loads again for a new address is waiting for its document again', async () => {
+  const { guard, page } = await harness({ appLoadLimit: 2000 });
+  const p = page();
+  const frame = p.frame(appId);
+  await p.advance(400);
+  frame.src = `${frame.src}?route=other`;
+  await p.advance(2400);
+  assert.throws(
+    () => guard.check(),
+    (error) => error.stage === 'document',
+  );
+});
+
+test('a frame that is ready after the limit still records its load time', async () => {
+  const { guard, annotations, page } = await harness({ appLoadLimit: 2000 });
+  const p = page();
+  const frame = p.frame(appId);
+  await p.advance(3000);
+  frame.skeleton = false;
+  frame.visibility = 'visible';
+  await p.advance(200);
+  assert.throws(() => guard.check(), /behind Jira's loading placeholder/);
+  assert.deepEqual(annotations, [
+    { type: 'app-readiness', description: 'placeholder' },
+    { type: 'app-frame-ms', description: '3000' }, // Since the page first saw it.
+  ]);
+});
+
+test('appReady resolves once every displayed app frame on the page is ready', async () => {
+  const { page } = await harness({ appLoadLimit: 5000 });
+  const p = page();
+  const frame = p.frame(appId);
+  p.frame(appId, { displayed: false });
+  await p.advance(200);
+  const ready = appReady(p, { timeout: 2000 });
+  await p.advance(600);
+  frame.skeleton = false;
+  frame.content = true;
+  await p.advance(200);
+  assert.deepEqual(
+    (await ready).map((f) => [f.title, f.stage, f.ms]),
+    [['Agent Prompts', 'ready', 800]],
+  );
+});
+
+test('appReady throws the stage the slowest frame hasn’t passed, once', async () => {
+  const { guard, annotations, page } = await harness({ appLoadLimit: 60_000 });
+  const p = page();
+  p.frame(appId, { title: 'Settings' }).skeleton = false; // Waiting for its root.
+  p.frame(appId, { title: 'Field', loaded: false }); // Waiting for its document.
+  await p.advance(200);
+  await assert.rejects(appReady(p, { timeout: 300 }), (error) => {
+    assert.equal(error.category, 'page-guard');
+    assert.equal(error.stage, 'document');
+    assert.equal(
+      error.message,
+      `The app frame "Field" was not ready within 0.3 s: its document didn't finish loading.`,
+    );
+    return true;
+  });
+  assert.deepEqual(annotations, [{ type: 'app-readiness', description: 'document' }]);
+  // Once those frames outlast the guard's own limit, the end-of-test check doesn't repeat them.
+  await p.advance(61_000);
+  assert.doesNotThrow(() => guard.check());
+  assert.deepEqual(
+    guard.readiness.map((r) => r.stage),
+    ['document'],
+  );
+});
+
+test('appReady names the attached stage when no app frame shows', async () => {
+  const { page } = await harness();
+  const p = page();
+  p.frame(otherApp);
+  p.frame(appId, { displayed: false });
+  await p.advance(200);
+  await assert.rejects(appReady(p, { timeout: 300 }), {
+    stage: 'attached',
+    message: 'The app was not ready within 0.3 s: no displayed app frame was attached to the page.',
+  });
+});
+
+test('appReady waits for nothing under forge tunnel or without app IDs, and needs a guard', async () => {
+  const tunnel = process.env.FORGE_TUNNEL;
+  process.env.FORGE_TUNNEL = '1';
+  try {
+    const { page } = await harness();
+    assert.deepEqual(await appReady(page(), { timeout: 100 }), []);
+  } finally {
+    if (tunnel === undefined) delete process.env.FORGE_TUNNEL;
+    else process.env.FORGE_TUNNEL = tunnel;
+  }
+  const { page } = await harness({ appIds: [] });
+  assert.deepEqual(await appReady(page(), { timeout: 100 }), []);
+  const bare = { context: () => ({}) };
+  await assert.rejects(appReady(bare), /needs the page guard/);
+  assert.deepEqual(await appReady(bare, { required: false }), []);
+});
+
+test('a test records each readiness failure for its suite step, failing or not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'guard-'));
+  const file = join(dir, 'step.jsonl');
+  const saved = process.env.FORGE_TEST_STEP_RESULT;
+  process.env.FORGE_TEST_STEP_RESULT = file;
+  try {
+    const { guard, page } = await harness({ appLoadLimit: 1000 });
+    const p = page();
+    p.frame(appId);
+    const context = { pages: () => [] };
+    const info = { title: 'AP-05 configuration', outputPath: (name) => join(dir, name) };
+    await assert.rejects(
+      guardTest(guard, context, async () => p.advance(1400), info),
+      (error) => error.stage === 'placeholder',
+    );
+    assert.deepEqual(
+      readFileSync(file, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line)),
+      [{ kind: 'app-readiness', test: 'AP-05 configuration', stage: 'placeholder' }],
+    );
+  } finally {
+    if (saved === undefined) delete process.env.FORGE_TEST_STEP_RESULT;
+    else process.env.FORGE_TEST_STEP_RESULT = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

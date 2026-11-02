@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import './support/config.mjs';
-import { checkSessions } from '../src/jira/commands.mjs';
+import { checkSessions, renewalOutcome, secrets } from '../src/jira/commands.mjs';
+import { browserTarget } from '../src/core/target.mjs';
 
 // Saved sessions are checked before a run signs in with them: a lapsed sign-in must refuse the run with what to do, never show up as a failing test.
 const now = new Date('2026-10-22T12:00:00Z');
@@ -48,7 +49,7 @@ test('a session expiring within a week warns, as an annotation on a GitHub runne
     const warnings = [];
     const found = checkSessions(directory, { now, env: {}, warn: (m) => warnings.push(m) });
     assert.deepEqual(warnings, [
-      'WARNING: The saved admin session expires in 5 day(s), on 2026-10-28; run forge-test login admin.',
+      'WARNING: The saved admin session expires in 5 day(s), on 2026-10-28; run forge-test renew admin.',
     ]);
     // Seven days ahead is not yet within a week; a session cookie with no date never warns.
     assert.deepEqual(
@@ -87,4 +88,52 @@ test('no saved sessions, or an unreadable one, is left to the sign-in that needs
   } finally {
     rmSync(directory, { recursive: true });
   }
+});
+
+test('a renewal replaces the saved session only when it is still signed in for longer', () => {
+  const before = new Date('2026-10-27T21:31:09Z');
+  const later = new Date('2026-11-24T23:59:05Z');
+  assert.deepEqual(renewalOutcome(before, later, true), { replace: true });
+  // A session that recorded no date may be replaced by one that has a date.
+  assert.deepEqual(renewalOutcome(null, later, true), { replace: true });
+  // Signed out (the site redirected to sign-in), not extended, or no dated sign-in: keep the file.
+  assert.equal(renewalOutcome(before, later, false).replace, false);
+  assert.match(renewalOutcome(before, later, false).reason, /no longer signed in/);
+  // Not extended: a failure within a week of expiring, otherwise current (renewed shortly before).
+  const soon = new Date('2026-10-25T21:31:09Z');
+  assert.match(renewalOutcome(before, before, true, soon).reason, /not extended/);
+  assert.match(renewalOutcome(before, new Date(before - 1), true, soon).reason, /not extended/);
+  assert.deepEqual(renewalOutcome(later, later, true, soon), { replace: false, current: true });
+  assert.match(renewalOutcome(before, null, true).reason, /no dated sign-in/);
+});
+
+test('secrets --sessions-only copies just the named sessions, never the configuration or credentials', (t) => {
+  const { authDirectory } = browserTarget();
+  mkdirSync(authDirectory, { recursive: true });
+  const file = `${authDirectory}/member.json`;
+  writeFileSync(
+    file,
+    JSON.stringify({
+      cookies: [cookie('tenant.session.token', '2999-01-01T00:00:00Z')],
+      origins: [],
+    }),
+  );
+  const lines = [];
+  t.mock.method(console, 'log', (line) => lines.push(line));
+  try {
+    secrets({
+      repo: 'owner/name',
+      environment: 'acceptance',
+      profiles: ['member'],
+      dryRun: true,
+      sessionsOnly: true,
+    });
+  } finally {
+    rmSync(file);
+  }
+  assert.equal(lines.length, 1);
+  assert.match(
+    lines[0],
+    /^Would set JIRA_SESSION_MEMBER \(\d+ bytes; session expires 2999-01-01\)$/,
+  );
 });

@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { browserTarget } from './target.mjs';
+import { confluenceTarget } from '../confluence/target.mjs';
 
 // Browser lanes. Each lane is one Playwright project, built only when selected (E2E_LANE) and
 // only after its explicit checks, so discovery (--list) refuses exactly as execution does.
@@ -16,8 +17,11 @@ const browser = {
 };
 
 // Disposable-fixture lanes share the feature options and the selected site's private paths.
+// A Confluence app's results stay under Confluence's state (PLUGIN_PRODUCT, set by the CLI).
 function featureLane(env, kind) {
   const target = browserTarget(env.PLUGIN_TEST_SITE || undefined);
+  const results =
+    env.PLUGIN_PRODUCT === 'confluence' ? confluenceTarget(target.host).results : target.results;
   return {
     testMatch: '**/*.features.spec.mjs',
     timeout: 300_000,
@@ -27,8 +31,8 @@ function featureLane(env, kind) {
       actionTimeout: 15_000,
       navigationTimeout: 45_000,
     },
-    outputDir: resolve(target.results(`${kind}-results`)),
-    report: resolve(target.results(`${kind}-report.json`)),
+    outputDir: resolve(results(`${kind}-results`)),
+    report: resolve(results(`${kind}-report.json`)),
   };
 }
 

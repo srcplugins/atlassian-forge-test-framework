@@ -15,7 +15,8 @@
     "./core": "./src/core/index.mjs",
     "./browser": "./src/core/browser.mjs",
     "./jira": "./src/jira/index.mjs",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./confluence": "./src/confluence/index.mjs"
   },
   "files": [
     "bin",

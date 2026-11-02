@@ -3,7 +3,7 @@ import { test as base, expect } from '../core/playwright.mjs';
 import { existsSync, readFileSync } from 'node:fs';
 import { openRun } from './run.mjs';
 import { site, tokenRequest, client } from './client.mjs';
-import { pageGuard } from './guard.mjs';
+import { appReady, defaultAppLoadLimit, guardTest, pageGuard } from '../core/page-guard.mjs';
 
 // The app ID in ./manifest.yml, when the tests run from an app's repository.
 const manifestAppId = () =>
@@ -19,7 +19,7 @@ export const test = base.extend({
   fixtureApp: [undefined, { option: true }],
   fixtureProfile: ['standard', { option: true }],
   expectedFlags: [[], { option: true }],
-  appLoadLimit: [15_000, { option: true }],
+  appLoadLimit: [defaultAppLoadLimit, { option: true }],
   appIds: [undefined, { option: true }],
   pageGuard: [
     async ({ context, expectedFlags, appLoadLimit, appIds }, use, info) => {
@@ -30,14 +30,7 @@ export const test = base.extend({
         expectedFlags,
         annotate: (type, description) => info.annotations.push({ type, description }),
       });
-      await use(guard);
-      try {
-        guard.check();
-      } catch (error) {
-        const [page] = context.pages();
-        await page?.screenshot({ path: info.outputPath('page-guard.png') }).catch(() => {});
-        throw error;
-      }
+      await guardTest(guard, context, use, info);
     },
     { auto: true },
   ],
@@ -95,12 +88,19 @@ export function installation(app) {
   if (!appId) throw Error('App ID unavailable: set installation appId or run from the app.');
   return { ...target, appId };
 }
-export async function projectPage(page, app, key) {
+/**
+ * Opens the app's space page and waits until the app is ready (`appReady`), so a frame that never
+ * loads fails here, naming its readiness stage. `{ ready: false }` only opens the page, as for a
+ * page Jira should refuse.
+ */
+export async function projectPage(page, app, key, { ready = true } = {}) {
   const t = installation(app);
   await page.goto(`${site()}/jira/software/projects/${key}/apps/${t.appId}/${t.environmentId}`, {
     waitUntil: 'domcontentloaded',
   });
+  if (ready) await appReady(page, { required: false });
 }
+/** Opens the app's work item panel and waits until the app in it is ready (`appReady`). */
 export async function panel(page, app, key, label) {
   const t = installation(app);
   await page.goto(`${site()}/browse/${key}`, { waitUntil: 'domcontentloaded' });
@@ -131,5 +131,6 @@ export async function panel(page, app, key, label) {
   const source = `contains(@src,"${t.environmentId}")${tunnel ? ' or starts-with(@src,"http://localhost:")' : ''}`;
   const container = title.locator(`xpath=ancestor::div[.//iframe[${source}]][1]`);
   await expect(container.locator('iframe')).toHaveCount(1);
+  await appReady(page, { required: false });
   return container;
 }

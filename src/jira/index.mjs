@@ -2,6 +2,7 @@ export { site, projects, client, allIssues, comments, tokenRequest } from './cli
 export { adf, adfFromText, adfText } from './adf.mjs';
 export { openRun, registerProfile } from './run.mjs';
 export { test, expect, installation, projectPage, panel } from './features.mjs';
+export { appReady, readinessStages } from './guard.mjs';
 export { test as themeTest, textContrast } from './appearance.mjs';
 export { projectAdminFixture } from './permission-grants.mjs';
 export { checkFixturePermissions } from './fixture-permissions.mjs';

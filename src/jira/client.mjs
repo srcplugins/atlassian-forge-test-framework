@@ -1,7 +1,7 @@
 import { request as playwrightRequest } from '@playwright/test';
 import { fixtureApps, ownedSites } from '../core/config.mjs';
 import { jiraConfig } from '../core/credentials.mjs';
-import { safeRequest } from '../core/safe-request.mjs';
+import { retryRead, safeRequest } from '../core/safe-request.mjs';
 import { activeTarget } from '../core/target.mjs';
 
 /** The Jira site under test, https://<host>. */
@@ -11,41 +11,50 @@ export const projects = () => fixtureApps();
 
 /**
  * A Jira REST v3 client bound to an owned site. GET 404 is null; other failures throw without
- * response details, marking definitive rejections. Writes never retry. A peer site is read-only.
+ * response details, marking definitive rejections. A GET that fails on transport or with HTTP
+ * 502, 503 or 504 runs once more (`retryRead`); writes never retry. A peer site is read-only.
  */
-export function client(request, targetSite = site()) {
+export function client(request, targetSite = site(), { retry = {} } = {}) {
   if (!ownedSites().some((host) => targetSite === `https://${host}`))
     throw Error('Owned Jira API site required');
   return async (path, method = 'GET', data) => {
     if (targetSite !== site() && method !== 'GET') throw Error('Peer tenant API is read-only');
     if (!path.startsWith('/') || path.includes('://') || path.includes('..'))
       throw Error('Invalid Jira path');
-    const response = await safeRequest(
-      () =>
-        request.fetch(`${targetSite}/rest/api/3${path}`, {
-          method,
-          ...(data === undefined ? {} : { data }),
-          timeout: 30000,
-          maxRedirects: 0,
-        }),
-      `${method} fetch`,
-    );
-    if (method === 'GET' && response.status() === 404) return null;
-    if (!response.ok()) {
-      const error = new Error(
-        `Fixture API ${method} failed (HTTP ${response.status()}); no automatic write retry.`,
-      );
-      // Jira refuses a rate-limited (429) request before processing it, so it changed nothing.
-      error.definitiveRejection = [400, 401, 403, 422, 429].includes(response.status());
-      throw error;
-    }
-    if (response.status() === 204) return null;
-    // Work item property creation returns 201 with an empty body.
-    const stage = `${method} HTTP ${response.status()}`;
-    const text = await safeRequest(() => response.text(), `${stage} body read`);
-    return text ? safeRequest(() => JSON.parse(text), `${stage} JSON parse`) : null;
+    const once = () => send(request, targetSite, path, method, data);
+    return method === 'GET' ? retryRead(once, { label: 'Jira GET', ...retry }) : once();
   };
 }
+
+/** One request: the fetch, the status check and the body read, so a read retries all of them. */
+async function send(request, targetSite, path, method, data) {
+  const response = await safeRequest(
+    () =>
+      request.fetch(`${targetSite}/rest/api/3${path}`, {
+        method,
+        ...(data === undefined ? {} : { data }),
+        timeout: 30000,
+        maxRedirects: 0,
+      }),
+    `${method} fetch`,
+  );
+  if (method === 'GET' && response.status() === 404) return null;
+  if (!response.ok()) {
+    const error = new Error(
+      `Fixture API ${method} failed (HTTP ${response.status()}); no automatic write retry.`,
+    );
+    // Jira refuses a rate-limited (429) request before processing it, so it changed nothing.
+    error.definitiveRejection = [400, 401, 403, 422, 429].includes(response.status());
+    error.status = response.status();
+    throw error;
+  }
+  if (response.status() === 204) return null;
+  // Work item property creation returns 201 with an empty body.
+  const stage = `${method} HTTP ${response.status()}`;
+  const text = await safeRequest(() => response.text(), `${stage} body read`);
+  return text ? safeRequest(() => JSON.parse(text), `${stage} JSON parse`) : null;
+}
+
 export async function allIssues(api, projectId) {
   let token;
   const seen = new Set();

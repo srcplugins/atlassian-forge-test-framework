@@ -36,6 +36,14 @@ export function validateConfig(value) {
     fail('legacyNamespaces must be [{ slug, brand, runPrefix? }]');
   if (!Array.isArray(sites) || !sites.length) fail('sites must list at least one owned site');
   for (const site of sites) {
+    if (
+      site?.products != null &&
+      (!Array.isArray(site.products) ||
+        !site.products.length ||
+        new Set(site.products).size !== site.products.length ||
+        site.products.some((p) => !['jira', 'confluence'].includes(p)))
+    )
+      fail('site products must name supported products without duplicates');
     if (!slug.test(site?.role ?? '')) fail('every site needs a role');
     if (!host.test(site.host ?? '')) fail('site hosts must be <name>.atlassian.net');
     if (site.expiresOn != null && Number.isNaN(Date.parse(site.expiresOn)))
@@ -52,6 +60,10 @@ export function validateConfig(value) {
     if (i.appId != null && !uuid.test(i.appId)) fail('appId must be a UUID');
   }
   const apps = fixtures.apps ?? {};
+  const confluenceSpaces = fixtures.confluenceSpaces ?? {};
+  for (const [name, spaceKey] of Object.entries(confluenceSpaces))
+    if (!slug.test(name) || !/^[A-Z][A-Z0-9]{1,9}$/.test(spaceKey))
+      fail('Confluence fixture spaces map slugs to keys');
   const projects = fixtures.projects ?? {};
   for (const [name, projectKey] of Object.entries({ ...apps, ...projects }))
     if (!slug.test(name) || !key.test(projectKey)) fail('fixture spaces map slugs to keys');
@@ -63,7 +75,13 @@ export function validateConfig(value) {
     legacyNamespaces: legacy,
     sites,
     installations,
-    fixtures: { apps, projects, identity: fixtures.identity, landing: fixtures.landing },
+    fixtures: {
+      apps,
+      projects,
+      confluenceSpaces,
+      identity: fixtures.identity,
+      landing: fixtures.landing,
+    },
     state: value.state,
     email: value.email,
     keychainService: value.keychainService,
@@ -131,6 +149,13 @@ export function fixtureProject(name) {
   const { apps, projects } = config().fixtures;
   const value = apps[name] ?? projects[name];
   if (!value) throw Error(`No fixture space configured for ${name}.`);
+  return value;
+}
+
+/** An app's Confluence fixture space key. */
+export function confluenceSpaceKey(app) {
+  const value = config().fixtures.confluenceSpaces[app];
+  if (!value) throw Error(`No Confluence fixture space configured for ${app}.`);
   return value;
 }
 

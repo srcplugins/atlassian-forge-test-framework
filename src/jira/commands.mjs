@@ -4,9 +4,10 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   writeFileSync,
 } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
@@ -15,12 +16,12 @@ import { config, daysUntilExpiry, landingIssue, ownedSites, siteFor } from '../c
 import { jiraConfig } from '../core/credentials.mjs';
 import { laneProject, lanes } from '../core/lanes.mjs';
 import { isMarker, markers } from '../core/markers.mjs';
-import { safeRequest } from '../core/safe-request.mjs';
+import { retryRead, safeRequest } from '../core/safe-request.mjs';
 import { activeTarget, browserTarget } from '../core/target.mjs';
 import { client, projects, tokenRequest } from './client.mjs';
 import { openRun } from './run.mjs';
 import { sitePreflight } from './site-preflight.mjs';
-import { siteLease } from './site-lease.mjs';
+import { heldFor, siteLease } from './site-lease.mjs';
 import { runSuite } from '../core/suite.mjs';
 
 // Implementations of the forge-test commands (bin/forge-test.mjs). Each refuses anything but an
@@ -30,13 +31,19 @@ import { runSuite } from '../core/suite.mjs';
  * Runs a suite while holding the site lease, so suites from other repositories or machines on
  * the same site wait. The lease is renewed on a timer and confirmed again right before each
  * step; a failed renewal retries on the next tick, and a lost lease stops the suite before its
- * next step or cleanup.
+ * next step or cleanup. FORGE_TEST_LEASE_PRIORITY=1 (a release or landing run) goes ahead of
+ * other waiters; any other suite gives the site to a waiting priority run between steps, waits
+ * up to `resumeWithin` for it to finish, and continues after its prerequisites run again.
  */
-export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
+export async function suite(
+  title,
+  steps,
+  { renewEvery = 5 * 60_000, resumeWithin = 120 * 60_000 } = {},
+) {
   checkSessions(activeTarget().authDirectory);
-  const { GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: run } = process.env;
   const lease = siteLease(client(await tokenRequest()), {
-    holder: repository ? `${repository} run ${run}` : 'a local run',
+    holder: leaseHolder('suite'),
+    priority: process.env.FORGE_TEST_LEASE_PRIORITY === '1',
   });
   await lease.acquire();
   let lost;
@@ -54,6 +61,17 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
         await renew();
         if (lost) throw lost;
       },
+      pause: async () => {
+        const first = await lease.priorityWaiting();
+        if (!first) return false;
+        console.log(
+          `\nPausing for ${first}, which goes first on this site; this suite resumes after it.`,
+        );
+        await renewing;
+        await lease.release();
+        await lease.acquire({ wait: resumeWithin });
+        return true;
+      },
       fixturesClean: () => fixturesClean(),
       receipt: suiteReceipt(title),
     });
@@ -65,6 +83,24 @@ export async function suite(title, steps, { renewEvery = 5 * 60_000 } = {}) {
       .release()
       .catch(() => console.error('Could not release the site lease; it expires on its own.'));
   }
+}
+
+const holderLabel = /^[\w .,:#/@()+-]{1,80}$/;
+
+/**
+ * The public label a run writes into the site lease, for the logs of runs that wait for it: the
+ * GitHub repository and run, else FORGE_TEST_LEASE_HOLDER (a name for this machine or session,
+ * never a host or account), else "a local suite" or "a local lane".
+ */
+export function leaseHolder(kind, env = process.env) {
+  const { GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: run, FORGE_TEST_LEASE_HOLDER: label } = env;
+  if (repository) return `${repository} run ${run}`;
+  if (!label) return `a local ${kind}`;
+  if (!holderLabel.test(label))
+    throw Error(
+      'FORGE_TEST_LEASE_HOLDER is up to 80 letters, digits, spaces and . , : # / @ ( ) + -.',
+    );
+  return `${label} (${kind})`;
 }
 
 /** Where a suite run's receipt goes: the site's private state, one file per run. */
@@ -87,31 +123,37 @@ export function fixturesClean(directory = activeTarget().runs) {
 export async function doctor() {
   const cfg = jiraConfig();
   if (!cfg.email || !cfg.token) throw Error('Set JIRA_EMAIL and JIRA_API_KEY.');
+  // Read-only, so a GET that fails on transport or with HTTP 502, 503 or 504 runs once more.
   const get = (path) =>
-    safeRequest(
-      () =>
-        fetch(`https://${cfg.site}/rest/api/3${path}`, {
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString('base64')}`,
-            Accept: 'application/json',
-          },
-          redirect: 'error',
-          signal: AbortSignal.timeout(20000),
-        }),
-      'GET fetch',
+    retryRead(
+      async () => {
+        const response = await safeRequest(
+          () =>
+            fetch(`https://${cfg.site}/rest/api/3${path}`, {
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString('base64')}`,
+                Accept: 'application/json',
+              },
+              redirect: 'error',
+              signal: AbortSignal.timeout(20000),
+            }),
+          'GET fetch',
+        );
+        const body = response.ok
+          ? await safeRequest(() => response.json(), 'GET HTTP 200 body read')
+          : null;
+        return { status: response.status, body };
+      },
+      { label: 'Jira GET', status: (r) => r.status },
     );
-  const response = await get('/myself');
-  if (!response.ok)
-    throw Error(
-      `Jira authentication probe: HTTP ${response.status}. Check token expiry, email and scopes.`,
-    );
-  const user = await safeRequest(() => response.json(), 'GET HTTP 200 body read');
+  const { status, body: user } = await get('/myself');
+  if (status !== 200)
+    throw Error(`Jira authentication probe: HTTP ${status}. Check token expiry, email and scopes.`);
   if (!user.accountId || !user.active) throw Error('Jira did not return an active account.');
   console.log('Jira authentication OK; active account verified.');
   const permissions = await get('/mypermissions?permissions=ADMINISTER');
-  if (!permissions.ok) throw Error(`Permission probe: HTTP ${permissions.status}`);
-  const admin = (await safeRequest(() => permissions.json(), 'GET HTTP 200 body read')).permissions
-    ?.ADMINISTER;
+  if (permissions.status !== 200) throw Error(`Permission probe: HTTP ${permissions.status}`);
+  const admin = permissions.body.permissions?.ADMINISTER;
   console.log(`Jira administrator: ${admin?.havePermission === true}`);
 }
 
@@ -247,26 +289,89 @@ export async function cleanup(app, runId) {
   }
 }
 
-/** The holder of another live site lease, read-only; a suite's own lanes pass its lease ID. */
-async function siteLeaseHolder(env) {
-  const request = await tokenRequest();
+/**
+ * Holds the site for a lane and resolves a function that releases it. A suite's own lane
+ * (FORGE_TEST_LEASE set) runs under the suite's lease and only checks that no one else holds the
+ * site. Any other lane takes the lease itself without waiting, renews it while it runs, and
+ * refuses at once when another run holds the site, naming that run and how long it has held it.
+ * An interactive caller can do something else and come back, where a waiting lane would hide the
+ * conflict; a suite (CI) waits instead.
+ */
+export async function laneLease(
+  env,
+  { api, renewEvery = 5 * 60_000, lease = siteLease, log = console.error } = {},
+) {
+  const request = api ? null : await tokenRequest();
+  const dispose = async () => request?.dispose();
+  const busy = (status) =>
+    Object.assign(
+      Error(
+        `The site is in use by ${status.holder}, which has held it for ${heldFor(status.heldMs)}; run the lane when it finishes (forge-test lease shows the holder).`,
+      ),
+      { siteBusy: true },
+    );
+  let held;
   try {
-    return await siteLease(client(request), { holder: 'a lane' }).heldByOther(env.FORGE_TEST_LEASE);
-  } finally {
-    await request.dispose();
+    held = lease(api ?? client(request), { holder: leaseHolder('lane', env) });
+    if (env.FORGE_TEST_LEASE) {
+      const status = await held.status(env.FORGE_TEST_LEASE);
+      if (status && !status.own) throw busy(status);
+      await dispose();
+      return async () => {};
+    }
+    try {
+      await held.acquire({ wait: 0 });
+    } catch (error) {
+      // A free site reserved for a priority run keeps the acquire's own message.
+      const status = error.siteBusy ? await held.status() : null;
+      throw status ? busy(status) : error;
+    }
+  } catch (error) {
+    await dispose();
+    throw error;
   }
+  let renewing;
+  let lost = false;
+  const timer = setInterval(() => {
+    renewing = held.renew().catch((error) => {
+      if (error.leaseLost && !lost) {
+        lost = true;
+        log('The site lease was lost while the lane ran; another run may now share the site.');
+      }
+    });
+  }, renewEvery);
+  return async () => {
+    clearInterval(timer);
+    // A renewal still in flight must settle before release, so it cannot recreate the lease.
+    await renewing;
+    await held
+      .release()
+      .catch(() => log('Could not release the site lease; it expires on its own.'));
+    await dispose();
+  };
 }
+
+const exitCode = (command, args, options) =>
+  new Promise((done) => {
+    const child = spawn(command, args, { ...options, stdio: 'inherit' });
+    child.on('error', () => done(1));
+    child.on('close', (code) => done(code ?? 1));
+  });
 
 /**
  * Runs one browser lane with the consumer's Playwright configuration. The lane's opt-ins, the
  * site's expiry, the saved sessions and the site lease are checked first, so a refusal happens
- * before Playwright starts. A lane outside a suite doesn't take the lease, but never starts while
- * a suite holds it, since its fixtures would share the suite's spaces.
+ * before Playwright starts. A lane holds the site lease while it runs (`laneLease`), since its
+ * fixtures share the spaces of every other run on the site.
  */
 export async function lane(
   name,
   extra = [],
-  { configFile = 'playwright.config.mjs', holder = siteLeaseHolder } = {},
+  {
+    configFile = 'playwright.config.mjs',
+    hold = laneLease,
+    run = (args, env) => exitCode(process.execPath, args, { env }),
+  } = {},
 ) {
   if (!Object.hasOwn(lanes, name ?? ''))
     throw Error(`Usage: forge-test lane <${Object.keys(lanes).join('|')}> [-- Playwright args]`);
@@ -278,15 +383,48 @@ export async function lane(
   if (days !== null && days <= 30)
     console.warn(`WARNING: the site under test expires in ${days} day(s).`);
   checkSessions(browserTarget(host).authDirectory, { env });
-  const busy = await holder(env);
-  if (busy) throw Error(`The site is in use by ${busy}; run the lane when it finishes.`);
   const cli = createRequire(resolve('package.json')).resolve('@playwright/test/cli');
-  const result = spawnSync(
-    process.execPath,
-    [cli, 'test', '-c', configFile, `--project=${name}`, ...extra],
-    { stdio: 'inherit', env },
-  );
-  return result.status ?? 1;
+  const release = await hold(env);
+  try {
+    return await run([cli, 'test', '-c', configFile, `--project=${name}`, ...extra], env);
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Read-only: the site lease on the site under test, as `siteLease(api).status()` reports it, or
+ * null when the site is free. Writes nothing, so it is safe while any run holds the site.
+ */
+export async function leaseStatus({ api } = {}) {
+  const request = api ? null : await tokenRequest();
+  try {
+    return await siteLease(api ?? client(request)).status();
+  } finally {
+    await request?.dispose();
+  }
+}
+
+/** The `forge-test lease` lines (or JSON) for a status from `leaseStatus`. */
+export function leaseReport(status, { json = false, now = Date.now() } = {}) {
+  if (json)
+    return JSON.stringify(
+      status
+        ? {
+            held: true,
+            holder: status.holder,
+            since: status.since === null ? null : new Date(status.since).toISOString(),
+            heldMinutes: status.heldMs === null ? null : Math.floor(status.heldMs / 60_000),
+            expires: new Date(status.expires).toISOString(),
+            priorityWaiting: status.priorityWaiting,
+          }
+        : { held: false },
+    );
+  if (!status) return 'The site lease is free.';
+  return [
+    `The site lease is held by ${status.holder}, for ${heldFor(status.heldMs)}; it lapses in ${heldFor(status.expires - now)} unless renewed.`,
+    ...(status.priorityWaiting ? [`${status.priorityWaiting} is waiting to go first.`] : []),
+  ].join('\n');
 }
 
 const limit = 48 * 1024; // GitHub's secret size limit.
@@ -339,24 +477,24 @@ export function checkSessions(
       return { profile: name.slice(0, -'.json'.length), expires };
     });
   const ci = !!env.GITHUB_ACTIONS;
-  const renew = (profile) =>
+  const onKeeper = (command) =>
     ci
-      ? `run forge-test login ${profile} on the machine that keeps the sessions, then forge-test secrets`
-      : `run forge-test login ${profile}`;
+      ? `run ${command} on the machine that keeps the sessions, then forge-test secrets`
+      : `run ${command}`;
   const expired = sessions.filter((s) => s.expires && s.expires <= now);
   if (expired.length)
     throw Error(
       expired
         .map(
           (s) =>
-            `The saved ${s.profile} session expired on ${day(s.expires)}; ${renew(s.profile)}.`,
+            `The saved ${s.profile} session expired on ${day(s.expires)}; ${onKeeper(`forge-test login ${s.profile}`)}.`,
         )
         .join('\n'),
     );
   for (const { profile, expires } of sessions) {
     const days = expires && Math.floor((expires - now) / 86_400_000);
     if (expires && days < renewWithin) {
-      const message = `The saved ${profile} session expires in ${days} day(s), on ${day(expires)}; ${renew(profile)}.`;
+      const message = `The saved ${profile} session expires in ${days} day(s), on ${day(expires)}; ${onKeeper(`forge-test renew ${profile}`)}.`;
       warn(ci ? `::warning title=Saved session expiring::${message}` : `WARNING: ${message}`);
     }
   }
@@ -364,21 +502,121 @@ export function checkSessions(
 }
 
 /**
+ * Whether a renewal may replace a saved session: the account is still signed in and its sign-in
+ * now lasts longer than before. Anything else keeps the saved file as it is. Atlassian extends the
+ * account's sign-in only so often, so a session renewed shortly before may not be extended again:
+ * that is `current` while it still has more than a week, and a failure after that.
+ */
+export function renewalOutcome(before, after, signedIn, now = new Date()) {
+  if (!signedIn) return { replace: false, reason: 'is no longer signed in' };
+  if (!after) return { replace: false, reason: 'has no dated sign-in after renewal' };
+  if (before && after <= before)
+    return before - now > renewWithin * 86_400_000
+      ? { replace: false, current: true }
+      : { replace: false, reason: 'was not extended' };
+  return { replace: true };
+}
+
+/**
+ * Renews saved sessions without a sign-in: Atlassian extends a session's sign-in cookies (about 30
+ * days) when it is used, on the site and on id.atlassian.com. Each session opens the landing work
+ * item and the Atlassian account page in headless Chrome, and is saved again only when Jira still
+ * returns its account and the sign-in lasts longer than before. An expired session needs `login`.
+ * Prints profile names and dates only. Returns whether every requested session was renewed or is
+ * current.
+ */
+export async function renew(profiles = [], { now = new Date(), settle = 20_000 } = {}) {
+  for (const profile of profiles)
+    if (!profileName.test(profile)) throw Error('Use a lowercase profile name, such as admin.');
+  const target = activeTarget();
+  if (jiraConfig().site !== target.host) throw Error('Browser/API site mismatch.');
+  // Each session's expiry, without refusing or warning: renew reports every one itself.
+  const saved = checkSessions(target.authDirectory, { now: new Date(0), warn: () => {} });
+  const chosen = profiles.length
+    ? profiles.map((profile) => {
+        const found = saved.find((s) => s.profile === profile);
+        if (!found) throw Error(`Missing ${profile} session; run forge-test login ${profile}.`);
+        return found;
+      })
+    : saved.filter((s) => s.expires);
+  if (!chosen.length) throw Error('No saved sessions to renew; run forge-test login first.');
+  let failed = 0;
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    for (const { profile, expires: before } of chosen) {
+      if (before && before <= now) {
+        console.log(`${profile}: expired on ${day(before)}; run forge-test login ${profile}.`);
+        failed++;
+        continue;
+      }
+      const path = `${target.authDirectory}/${profile}.json`;
+      const context = await browser.newContext({ storageState: path });
+      try {
+        const page = await context.newPage();
+        await page.goto(`${target.site}/browse/${landingIssue()}`, {
+          waitUntil: 'domcontentloaded',
+        });
+        const me = await context.request
+          .get(`${target.site}/rest/api/3/myself`, { maxRedirects: 0 })
+          .catch(() => null);
+        const signedIn = !!(me?.ok() && (await me.json().catch(() => null))?.accountId);
+        if (signedIn)
+          await page.goto('https://id.atlassian.com/manage-profile', {
+            waitUntil: 'domcontentloaded',
+          });
+        let after = sessionExpiry({ cookies: await context.cookies() });
+        for (const deadline = Date.now() + settle; signedIn && Date.now() < deadline;) {
+          if (after && (!before || after > before)) break;
+          await page.waitForTimeout(1000);
+          after = sessionExpiry({ cookies: await context.cookies() });
+        }
+        const outcome = renewalOutcome(before, after, signedIn, now);
+        if (outcome.current) {
+          console.log(`${profile}: current, signed in until ${day(before)}.`);
+          continue;
+        }
+        if (!outcome.replace) {
+          console.log(`${profile}: ${outcome.reason}; kept the saved session.`);
+          failed++;
+          continue;
+        }
+        const next = `${path}.renewing`;
+        await context.storageState({ path: next, indexedDB: true });
+        chmodSync(next, 0o600);
+        renameSync(next, path);
+        console.log(`${profile}: renewed, signed in until ${day(after)}.`);
+      } finally {
+        await context.close();
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+  return failed === 0;
+}
+
+/**
  * Copies this configuration, the API credentials, saved sessions and the identity pins into a
  * GitHub Actions environment's secrets through `gh secret set` (values on stdin). Prints names,
- * sizes and session expiry dates only.
+ * sizes and session expiry dates only. `sessionsOnly` sets just the sessions, as after `renew`,
+ * leaving the configuration, credentials and identity pins as they are.
  */
-export function secrets({ repo, environment, profiles, dryRun }) {
+export function secrets({ repo, environment, profiles, dryRun, sessionsOnly = false }) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? '') || !profileName.test(environment ?? ''))
-    throw Error('Usage: forge-test secrets --repo <owner/name> --env <environment> [--dry-run]');
+    throw Error(
+      'Usage: forge-test secrets --repo <owner/name> --env <environment> [--sessions-only] [--dry-run]',
+    );
   const target = browserTarget(siteFor('primary'));
-  const { email, token } = jiraConfig();
-  if (!email || !token) throw Error('Jira credentials are not configured.');
-  const list = [
-    { name: 'FORGE_TEST_CONFIG', value: JSON.stringify({ ...config(), state: undefined }) },
-    { name: 'JIRA_EMAIL', value: email },
-    { name: 'JIRA_API_KEY', value: token },
-  ];
+  const list = [];
+  if (!sessionsOnly) {
+    const { email, token } = jiraConfig();
+    if (!email || !token) throw Error('Jira credentials are not configured.');
+    list.push(
+      { name: 'FORGE_TEST_CONFIG', value: JSON.stringify({ ...config(), state: undefined }) },
+      { name: 'JIRA_EMAIL', value: email },
+      { name: 'JIRA_API_KEY', value: token },
+    );
+  }
   for (const profile of profiles) {
     if (!profileName.test(profile)) throw Error('Invalid profile name.');
     const file = `${target.authDirectory}/${profile}.json`;
@@ -396,7 +634,7 @@ export function secrets({ repo, environment, profiles, dryRun }) {
     });
   }
   const identity = `${target.directory}/identity-fixture.json`;
-  if (existsSync(identity))
+  if (!sessionsOnly && existsSync(identity))
     list.push({ name: 'JIRA_IDENTITY_FIXTURE', value: packed(readFileSync(identity, 'utf8')) });
   for (const secret of list) {
     const detail = `${secret.name} (${secret.value.length} bytes${secret.note ? `; ${secret.note}` : ''})`;

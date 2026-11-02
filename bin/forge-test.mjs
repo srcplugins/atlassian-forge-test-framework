@@ -9,35 +9,50 @@ import {
   cleanup,
   doctor,
   lane,
+  leaseReport,
+  leaseStatus,
   login,
   maskValues,
   prepare,
   preflight,
+  renew,
   restore,
   secrets,
   suite,
 } from '../src/jira/commands.mjs';
+import * as confluence from '../src/confluence/commands.mjs';
 
 // forge-test: hosted acceptance commands for a Forge app repository. The repository's optional
-// forge-test.mjs module supplies its suites, registers fixture profiles (registerProfile) and
-// names its guarded Forge CLI command. Usage: docs/commands.md.
+// forge-test.mjs module supplies its suites, registers fixture profiles (registerProfile), names
+// its guarded Forge CLI command and its host product (`product`, jira by default). Usage:
+// docs/commands.md.
 const usage = `Usage: forge-test <command>
-  doctor                         Check the configured Jira account (read-only)
+  doctor                         Check the configured account in the app's product (read-only)
   preflight <host>               Inventory an owned site (read-only)
   login [profile]                Save a browser session after a manual sign-in
-  prepare                        Create or verify the marked fixture spaces
+  renew [profile...]             Extend saved sessions without signing in (default: all)
+  prepare                        Create or verify the marked fixture spaces (Jira or Confluence)
   cleanup <fixture-app> <run>    Guarded cleanup of one journaled run
   lane <lane> [--config f] [-- args]  Run a Playwright lane (features, compatibility)
   suite <name> [--only a,b] [--list]  Run a suite from forge-test.mjs (--only: its prerequisites
                                  and the steps whose names contain a term)
+  lease [--json]                 Show who holds the site lease, and for how long (read-only)
   install [--role r] [-e env]    Install or upgrade the app through the module's Forge command
-  secrets --repo o/r --env e [--profiles a,b] [--dry-run]   Copy state into GitHub secrets
+  secrets --repo o/r --env e [--profiles a,b] [--sessions-only] [--dry-run]
+                                 Copy state into GitHub secrets
   restore                        Write sessions from CI secrets into the private state layout
   mask                           Print ::add-mask:: lines for owned hosts, IDs and fixture space keys`;
 
 async function consumer() {
   const file = resolve('forge-test.mjs');
   return existsSync(file) ? import(pathToFileURL(file).href) : {};
+}
+/** The app's host product, from forge-test.mjs: jira unless it says confluence. */
+async function product() {
+  const { product: value = 'jira' } = await consumer();
+  if (!['jira', 'confluence'].includes(value))
+    throw Error('forge-test.mjs product must be jira or confluence.');
+  return value;
 }
 function option(args, name) {
   const i = args.indexOf(name);
@@ -48,7 +63,7 @@ const [command, ...args] = process.argv.slice(2);
 try {
   switch (command) {
     case 'doctor':
-      await doctor();
+      await ((await product()) === 'confluence' ? confluence.doctor() : doctor());
       break;
     case 'preflight':
       await preflight(args[0]);
@@ -56,8 +71,11 @@ try {
     case 'login':
       await login(args[0]);
       break;
+    case 'renew':
+      process.exitCode = (await renew(args)) ? 0 : 1;
+      break;
     case 'prepare':
-      await prepare();
+      await ((await product()) === 'confluence' ? confluence.prepare() : prepare());
       break;
     case 'cleanup':
       await consumer();
@@ -67,6 +85,7 @@ try {
       const split = args.indexOf('--');
       const own = split < 0 ? args : args.slice(0, split);
       const configFile = option(own, '--config') ?? 'playwright.config.mjs';
+      process.env.PLUGIN_PRODUCT = await product();
       process.exitCode = await lane(own[0], split < 0 ? [] : args.slice(split + 1), { configFile });
       break;
     }
@@ -81,8 +100,12 @@ try {
       else process.exitCode = (await suite(title, steps)) ? 0 : 1;
       break;
     }
+    case 'lease':
+      console.log(leaseReport(await leaseStatus(), { json: args.includes('--json') }));
+      break;
     case 'install': {
       const { forge } = await consumer();
+      const host = await product();
       if (!Array.isArray(forge) || !forge.length)
         throw Error('forge-test.mjs must export forge: the guarded Forge CLI command.');
       const options = installOptions(args);
@@ -97,10 +120,11 @@ try {
         JSON.parse(listed.stdout.slice(start)),
         options.site,
         options.environment,
+        host,
       );
       const result = spawnSync(
         forge[0],
-        [...forge.slice(1), ...installArguments(options, installed)],
+        [...forge.slice(1), ...installArguments(options, installed, host)],
         {
           stdio: 'inherit',
         },
@@ -114,6 +138,7 @@ try {
         environment: option(args, '--env'),
         profiles: (option(args, '--profiles') ?? 'admin').split(','),
         dryRun: args.includes('--dry-run'),
+        sessionsOnly: args.includes('--sessions-only'),
       });
       break;
     case 'restore':
