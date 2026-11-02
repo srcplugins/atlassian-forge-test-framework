@@ -25,6 +25,14 @@ test('every lane keeps reports, results and sessions in the site private state',
   }
 });
 
+test("a Confluence app's lane results stay under Confluence's state, and need a Confluence site", () => {
+  // The synthetic primary site lists no products, so it grants no Confluence access.
+  assert.throws(
+    () => laneProject('features', { PLUGIN_PRODUCT: 'confluence' }),
+    /Verified owned Confluence site/,
+  );
+});
+
 test('the Playwright configuration is serial, never retries and stops at the first failure', () => {
   const config = definePlaywrightConfig({ testDir: 'tests/hosted' }, { E2E_LANE: 'features' });
   assert.equal(config.workers, 1);

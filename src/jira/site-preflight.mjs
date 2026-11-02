@@ -1,30 +1,41 @@
-import { safeRequest } from '../core/safe-request.mjs';
+import { retryRead, safeRequest } from '../core/safe-request.mjs';
 import { ownedSites } from '../core/config.mjs';
 
 // Read-only audit of an owned site. Add a candidate site to the configuration first;
 // registration alone does not authorize fixture writes on it.
-export async function sitePreflight({ site, email, token, fetchImpl = fetch }) {
+// Every request is a GET, so one that fails on transport or with HTTP 502, 503 or 504 runs once
+// more (`retryRead`).
+export async function sitePreflight({ site, email, token, fetchImpl = fetch, retry = {} }) {
   if (!ownedSites().includes(site)) throw Error('Explicitly owned audit site required.');
   if (!email || !token) throw Error('Jira credentials required.');
   const results = {};
-  async function get(name, path) {
-    const response = await safeRequest(
-      () =>
-        fetchImpl(`https://${site}/rest/api/3${path}`, {
-          method: 'GET',
-          redirect: 'error',
-          signal: AbortSignal.timeout(20000),
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,
-            Accept: 'application/json',
-          },
-        }),
-      'GET fetch',
+  const read = (path) =>
+    retryRead(
+      async () => {
+        const response = await safeRequest(
+          () =>
+            fetchImpl(`https://${site}/rest/api/3${path}`, {
+              method: 'GET',
+              redirect: 'error',
+              signal: AbortSignal.timeout(20000),
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,
+                Accept: 'application/json',
+              },
+            }),
+          'GET fetch',
+        );
+        const body = response.ok
+          ? await safeRequest(() => response.json(), `GET HTTP ${response.status} body read`)
+          : null;
+        return { status: response.status, body };
+      },
+      { label: 'Jira GET', status: (r) => r.status, ...retry },
     );
-    results[name] = { status: response.status };
-    return response.ok
-      ? safeRequest(() => response.json(), `GET HTTP ${response.status} body read`)
-      : null;
+  async function get(name, path) {
+    const { status, body } = await read(path);
+    results[name] = { status };
+    return body;
   }
   const server = await get('server', '/serverInfo');
   if (server?.baseUrl !== `https://${site}` || server?.deploymentType !== 'Cloud') {

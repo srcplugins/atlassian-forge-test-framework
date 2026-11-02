@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { copyAgentProfile, isAgentSearch, settledCount } from '../src/core/rovo.mjs';
+import { copyAgentProfile, fullGallery, isAgentSearch, settledCount } from '../src/core/rovo.mjs';
 // Offline polling: tight intervals, but a generous budget so a loaded machine can't
 // fail the passing cases; only the timeout case uses the short budget. The hosted
 // journey keeps the default five-second wait.
@@ -77,6 +77,43 @@ test('a gallery that keeps changing fails instead of being counted', async () =>
   let reads = 0;
   const locator = { count: async () => reads++ };
   await assert.rejects(settledCount(locator, expire), /agent gallery kept changing/);
+});
+
+// After a match is found the gallery reopens, and can settle on one of the two agents.
+test('a short reopened gallery is opened again until it lists every agent', async () => {
+  const listed = [1, 1, 2];
+  let opened = 0;
+  const open = async () => {
+    const count = listed[opened++];
+    return { count: async () => count };
+  };
+  const choices = await fullGallery(open, 2, { poll: expire });
+  assert.equal(await choices.count(), 2);
+  assert.equal(opened, 3);
+});
+
+test('a gallery that stays short fails after its last opening', async () => {
+  let opened = 0;
+  const open = async () => {
+    opened++;
+    return { count: async () => 1 };
+  };
+  await assert.rejects(
+    fullGallery(open, 2, { attempts: 2, poll: expire }),
+    /listed 1 agents instead of 2 after 2 openings/,
+  );
+  assert.equal(opened, 2);
+});
+
+test('a gallery that completes while it is counted is not opened again', async () => {
+  let reads = 0;
+  let opened = 0;
+  const open = async () => {
+    opened++;
+    return { count: async () => (reads++ < 3 ? 1 : 2) };
+  };
+  await fullGallery(open, 2, { poll });
+  assert.equal(opened, 1);
 });
 
 // Only the gallery's server search for the exact name lists every same-named agent.

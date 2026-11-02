@@ -173,10 +173,115 @@ test('a receipt records each step outcome and times, and a skipped one as not ru
   }
 });
 
+test('a step’s readiness failures reach the summary and the receipt; malformed records do not', async () => {
+  const h = harness();
+  const summary = join(h.dir, 'summary.md');
+  try {
+    const file = join(h.dir, 'suites', 'receipt.json');
+    // What the page guard fixture writes (recordStepResult), plus lines a step must not smuggle in.
+    const records = [
+      { kind: 'app-readiness', test: 'AP-05 configuration', stage: 'placeholder' },
+      { kind: 'app-readiness', test: 'AP-06', stage: 'Not a stage' },
+      { kind: 'other', test: 'AP-07', stage: 'root' },
+    ];
+    const journeys = node(
+      `const fs = require('fs'); fs.appendFileSync(process.env.FORGE_TEST_STEP_RESULT, ${JSON.stringify(
+        records.map((r) => JSON.stringify(r)).join('\n') + '\nnot json\n',
+      )}); process.exit(1)`,
+    );
+    await h.run(
+      [
+        { name: 'journeys', command: journeys, cleanup: 'fixtures' },
+        { name: 'after', command: logStep(h.log, 'after') },
+      ],
+      {
+        cwd: h.dir,
+        receipt: file,
+        fixturesClean: () => true,
+        env: { PATH: process.env.PATH, GITHUB_STEP_SUMMARY: summary },
+      },
+    );
+    const [journeysStep, after] = JSON.parse(readFileSync(file, 'utf8')).steps;
+    assert.deepEqual(journeysStep.readiness, [
+      { test: 'AP-05 configuration', stage: 'placeholder' },
+    ]);
+    assert.equal(after.readiness, undefined);
+    assert.match(
+      readFileSync(summary, 'utf8'),
+      /\| journeys \| \*\*failed\*\*, cleaned up; app not ready \(AP-05 configuration: placeholder\) \|/,
+    );
+  } finally {
+    h.done();
+  }
+});
+
 test('receipt files are named by suite, time and process, inside the site state', () => {
   const at = new Date(Date.UTC(2026, 9, 22, 1, 2, 3, 4));
   assert.equal(
     suiteReceipt('features suite (only AP-17)', at, '/state/e2e'),
     `/state/e2e/suites/features-suite-only-ap-17-2026-10-22T01-02-03.004Z-${process.pid}.json`,
   );
+});
+
+test('after a pause the passed prerequisites run again before the next step', async () => {
+  const h = harness();
+  try {
+    const file = join(h.dir, 'suites', 'receipt.json');
+    let pauses = 0;
+    const ok = await h.run(
+      [
+        { name: 'deploy', command: logStep(h.log, 'deploy'), prerequisite: true },
+        { name: 'install', command: logStep(h.log, 'install'), prerequisite: true },
+        { name: 'a', command: logStep(h.log, 'a') },
+        { name: 'b', command: logStep(h.log, 'b') },
+      ],
+      { cwd: h.dir, receipt: file, pause: async () => ++pauses === 2 },
+    );
+    assert.equal(ok, true);
+    // Asked before each step but the prerequisites; only the second answer paused.
+    assert.equal(pauses, 2);
+    assert.deepEqual(h.lines(), [
+      'deploy run-1',
+      'install run-2',
+      'a run-3',
+      'deploy run-4',
+      'install run-5',
+      'b run-6',
+    ]);
+    const receipt = JSON.parse(readFileSync(file, 'utf8'));
+    assert.deepEqual(
+      receipt.pauses.map((p) => [p.before, p.outcome]),
+      [['b', 'passed']],
+    );
+    assert.equal(receipt.pauses[0].started, receipt.steps[2].finished);
+  } finally {
+    h.done();
+  }
+});
+
+test('a prerequisite that fails after a pause, or a pause that fails, stops the suite', async () => {
+  const h = harness();
+  try {
+    // The deploy passes once, then fails.
+    const deploy = node(
+      `const fs = require('fs'); const log = ${JSON.stringify(h.log)}; const again = fs.readFileSync(log, 'utf8').includes('deploy'); fs.appendFileSync(log, 'deploy\\n'); process.exit(again ? 1 : 0)`,
+    );
+    const steps = [
+      { name: 'deploy', command: deploy, prerequisite: true },
+      { name: 'a', command: logStep(h.log, 'a') },
+      { name: 'b', command: logStep(h.log, 'b') },
+      { name: 'c', command: logStep(h.log, 'c') },
+    ];
+    let asked = 0;
+    assert.equal(await h.run(steps, { pause: async () => ++asked === 2 }), false);
+    assert.deepEqual(h.lines(), ['deploy', 'a run-2', 'deploy']);
+    writeFileSync(h.log, '');
+    const paused = async () => {
+      throw Error('the site is still in use');
+    };
+    assert.equal(await h.run(steps, { pause: paused }), false);
+    assert.deepEqual(h.lines(), ['deploy']);
+  } finally {
+    h.done();
+  }
 });

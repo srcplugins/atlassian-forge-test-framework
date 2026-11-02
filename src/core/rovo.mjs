@@ -77,10 +77,12 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
     return ids;
   };
   const ids = await identifiers(choices);
+  // A reopened gallery can settle on one of the agents even after its search answered; the count
+  // is known by now, so a short gallery is opened again rather than counted.
+  const reopen = () => fullGallery(gallery, count);
   const matches = [];
   for (let index = 0; index < ids.length; index++) {
-    if (index) choices = await gallery();
-    await expect(choices).toHaveCount(count);
+    if (index) choices = await reopen();
     const current = await identifiers(choices);
     const selected = current.indexOf(ids[index]);
     expect(selected).toBeGreaterThanOrEqual(0);
@@ -90,8 +92,7 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
     if (inventory.matches(response)) matches.push(ids[index]);
   }
   expect(matches).toHaveLength(1);
-  choices = await gallery();
-  await expect(choices).toHaveCount(count);
+  choices = await reopen();
   const selected = (await identifiers(choices)).indexOf(matches[0]);
   expect(selected).toBeGreaterThanOrEqual(0);
   await select(choices, selected);
@@ -118,6 +119,29 @@ export function isAgentSearch(request, agent) {
     return false;
   }
   return variables?.input?.name === agent;
+}
+/**
+ * Opens the gallery with `open` until it lists `expected` agents, at most `attempts` times, and
+ * returns its choices. `poll` overrides the wait for each opening's count, for offline tests.
+ */
+export async function fullGallery(
+  open,
+  expected,
+  { attempts = 3, poll = { timeout: 15000, intervals: [1000] } } = {},
+) {
+  let listed;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const choices = await open();
+    try {
+      await expect.poll(async () => (listed = await choices.count()), poll).toBe(expected);
+      return choices;
+    } catch {
+      // Rovo kept a short (or long) list; a fresh page load searches again.
+    }
+  }
+  throw Error(
+    `The agent gallery listed ${listed} agents instead of ${expected} after ${attempts} openings`,
+  );
 }
 /**
  * Waits until a locator's count is the same on two reads `poll.intervals` apart, and returns it.

@@ -1,42 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './support/config.mjs';
-import { markers } from '../src/core/markers.mjs';
-import { siteLease } from '../src/jira/site-lease.mjs';
-
-const path = '/project/AUTH/properties/acme.site-lease';
-
-// One shared Jira site: the identity space and its lease property, with a manual clock.
-function site({ description = markers.identityProject } = {}) {
-  const s = { clock: 0, property: undefined, writes: 0, deletes: 0 };
-  s.api = async (url, method = 'GET', data) => {
-    if (url === '/project/AUTH') return { key: 'AUTH', description };
-    assert.equal(url, path);
-    if (method === 'PUT') {
-      s.writes++;
-      s.property = structuredClone(data);
-      return null;
-    }
-    if (method === 'DELETE') {
-      s.deletes++;
-      s.property = undefined;
-      return null;
-    }
-    return s.property === undefined ? null : { value: structuredClone(s.property) };
-  };
-  s.lease = (holder, extra = {}) =>
-    siteLease(s.api, {
-      holder,
-      now: () => s.clock,
-      sleep: async (ms) => {
-        s.clock += ms;
-        await extra.onSleep?.();
-      },
-      log: () => {},
-      ...extra,
-    });
-  return s;
-}
+import { heldFor } from '../src/jira/site-lease.mjs';
+import { leaseSite as site } from './support/lease-site.mjs';
 
 test('a free site is leased, renewed and released', async () => {
   const s = site();
@@ -159,4 +125,119 @@ test('a lane sees a live lease held by someone else, never its own suite’s, wi
   s.clock += 16 * 60_000;
   assert.equal(await lane.heldByOther(), null);
   assert.equal(s.writes, writes);
+});
+
+test('a waiting priority run goes ahead of other waiters, and the holder can see it waiting', async () => {
+  const s = site();
+  const holder = s.lease('copy run');
+  await holder.acquire();
+  assert.equal(await holder.priorityWaiting(), null);
+  let first = true;
+  const release = s.lease('release run', {
+    priority: true,
+    onSleep: async () => {
+      if (!first) return;
+      first = false;
+      assert.equal(s.reservation.holder, 'release run');
+      assert.equal(await holder.priorityWaiting(), 'release run');
+      await holder.release();
+      // The site is free, but another waiter leaves it to the reservation.
+      await assert.rejects(
+        () => s.lease('other copy run').acquire({ wait: 0 }),
+        /^Error: The site is reserved for release run, which goes first; try again later\.$/,
+      );
+      assert.equal(s.property, undefined);
+    },
+  });
+  await release.acquire();
+  assert.equal(s.property.holder, 'release run');
+  assert.equal(s.reservation, undefined);
+});
+
+test('a priority holder never gives way, and an expired reservation holds nothing', async () => {
+  const s = site();
+  const release = s.lease('release run', { priority: true });
+  assert.equal(await release.priorityWaiting(), null); // Not held yet.
+  await release.acquire();
+  s.reservation = { id: 'other-id', holder: 'another release', expires: s.clock + 90_000 };
+  assert.equal(await release.priorityWaiting(), null);
+  await release.release();
+  // A waiter that gave up stops renewing, so its reservation lapses within a few polls.
+  s.reservation.expires = s.clock - 1;
+  const copy = s.lease('copy run');
+  await copy.acquire();
+  assert.equal(s.property.holder, 'copy run');
+  assert.equal(await copy.priorityWaiting(), null);
+});
+
+test('the lease records when it was taken, and renewals keep that time', async () => {
+  const s = site();
+  s.clock = 1_000_000;
+  const lease = s.lease('repo-a');
+  await lease.acquire();
+  const since = s.property.since;
+  assert.equal(since, 1_000_000);
+  s.clock += 10 * 60_000;
+  await lease.renew();
+  assert.equal(s.property.since, since);
+});
+
+test('a waiter logs, and its refusal names, the holder and how long it has held the site', async () => {
+  const s = site();
+  const holder = s.lease('org/plugin run 7');
+  await holder.acquire();
+  s.clock += 12 * 60_000 - 6000; // Less the acquire's two settle pauses.
+  await holder.renew(); // As the holder's timer does while it runs.
+  const logs = [];
+  await assert.rejects(
+    () => s.lease('repo-b', { wait: 5 * 60_000, log: (line) => logs.push(line) }).acquire(),
+    (error) => {
+      assert.equal(
+        error.message,
+        'The site is still in use by org/plugin run 7, which has held it for 17 minutes; try again later.',
+      );
+      assert.equal(error.siteBusy, true);
+      return true;
+    },
+  );
+  assert.deepEqual(logs, [
+    'Waiting for org/plugin run 7, which has held it for 12 minutes, to finish on this site (up to 5 minutes).',
+  ]);
+});
+
+test('status reads the live holder without writing, and is null when the site is free', async () => {
+  const s = site();
+  const lease = s.lease('repo-a');
+  assert.equal(await lease.status(), null);
+  s.clock = 5_000;
+  await lease.acquire();
+  s.clock += 3 * 60_000;
+  s.reservation = { id: 'r', holder: 'release run', expires: s.clock + 90_000 };
+  const writes = s.writes;
+  const observer = s.lease('a status command');
+  assert.deepEqual(await observer.status(), {
+    holder: 'repo-a',
+    since: 5_000,
+    heldMs: 3 * 60_000 + 6000,
+    expires: s.property.expires,
+    own: false,
+    priorityWaiting: 'release run',
+  });
+  assert.equal((await lease.status()).own, true);
+  assert.equal((await observer.status(lease.id)).own, true);
+  assert.equal(s.writes, writes);
+  // A lease written by an earlier version has no start time.
+  delete s.property.since;
+  assert.equal((await observer.status()).heldMs, null);
+  s.clock += 16 * 60_000;
+  assert.equal(await observer.status(), null);
+});
+
+test('held durations read as words', () => {
+  assert.equal(heldFor(30_000), 'less than a minute');
+  assert.equal(heldFor(60_000), '1 minute');
+  assert.equal(heldFor(59 * 60_000), '59 minutes');
+  assert.equal(heldFor(125 * 60_000), '2 h 5 min');
+  assert.equal(heldFor(null), 'an unknown time');
+  assert.equal(heldFor(-1), 'an unknown time');
 });
