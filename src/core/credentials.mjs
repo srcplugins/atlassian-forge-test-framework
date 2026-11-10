@@ -32,22 +32,30 @@ function localEmail() {
   }
 }
 
-// ATLASSIAN_* name the one account for every product; the older JIRA_* names still work.
+// ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN name the one account for every product and for the
+// Forge CLI; no other variable is read. The configuration and the keyring are where a machine
+// stores the same two values.
 export function atlassianCredentials(env = process.env) {
-  const email = env.ATLASSIAN_EMAIL || env.JIRA_EMAIL || config().email || localEmail();
-  const token =
-    env.ATLASSIAN_API_TOKEN || env.JIRA_API_KEY || keychainToken(config().keychainService);
   return {
-    email,
-    token,
-    forgeEmail: env.FORGE_EMAIL || email,
-    forgeToken: env.FORGE_API_TOKEN || token,
+    email: env.ATLASSIAN_EMAIL || config().email || localEmail(),
+    token: env.ATLASSIAN_API_TOKEN || keychainToken(config().keychainService),
   };
+}
+
+/** The account's credentials, or an error naming each variable that is missing. */
+export function requireCredentials(env = process.env) {
+  const credentials = atlassianCredentials(env);
+  const missing = [
+    !credentials.email && 'ATLASSIAN_EMAIL',
+    !credentials.token && 'ATLASSIAN_API_TOKEN',
+  ].filter(Boolean);
+  if (missing.length) throw Error(`Set ${missing.join(' and ')}.`);
+  return credentials;
 }
 
 /** The selected API site (JIRA_SITE or the primary role) with credentials. */
 export function jiraConfig(env = process.env) {
-  return { site: apiSite(env), ...atlassianCredentials(env) };
+  return { site: apiSite(env), ...requireCredentials(env) };
 }
 
 /** The selected API site: JIRA_SITE or the primary role, always an owned site. */

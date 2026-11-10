@@ -14,7 +14,7 @@ import { resolve } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { chromium, request as playwrightRequest } from '@playwright/test';
 import { config, daysUntilExpiry, landingIssue, ownedSites, siteFor } from '../core/config.mjs';
-import { jiraConfig } from '../core/credentials.mjs';
+import { apiSite, jiraConfig } from '../core/credentials.mjs';
 import { laneProject, lanes } from '../core/lanes.mjs';
 import { isMarker, markers } from '../core/markers.mjs';
 import { retryRead, safeRequest } from '../core/safe-request.mjs';
@@ -172,8 +172,6 @@ export function fixturesClean(directory = activeTarget().runs) {
 
 export async function doctor() {
   const cfg = jiraConfig();
-  if (!cfg.email || !cfg.token)
-    throw Error('Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN (or JIRA_EMAIL and JIRA_API_KEY).');
   // Read-only, so a GET that fails on transport or with HTTP 502, 503 or 504 runs once more.
   const get = (path) =>
     retryRead(
@@ -221,7 +219,7 @@ const profileName = /^[a-z][a-z0-9-]*$/;
 export async function login(profile = 'admin') {
   if (!profileName.test(profile)) throw Error('Use a lowercase profile name, such as admin.');
   const target = activeTarget();
-  if (jiraConfig().site !== target.host) throw Error('Browser/API site mismatch.');
+  if (apiSite() !== target.host) throw Error('Browser/API site mismatch.');
   mkdirSync(target.authDirectory, { recursive: true, mode: 0o700 });
   chmodSync(target.authDirectory, 0o700);
   const browser = await chromium.launch({ channel: 'chrome', headless: false });
@@ -607,7 +605,7 @@ export async function renew(profiles = [], { now = new Date(), settle = 20_000 }
   for (const profile of profiles)
     if (!profileName.test(profile)) throw Error('Use a lowercase profile name, such as admin.');
   const target = activeTarget();
-  if (jiraConfig().site !== target.host) throw Error('Browser/API site mismatch.');
+  if (apiSite() !== target.host) throw Error('Browser/API site mismatch.');
   // Each session's expiry, without refusing or warning: renew reports every one itself.
   const saved = checkSessions(target.authDirectory, { now: new Date(0), warn: () => {} });
   const chosen = profiles.length
@@ -809,11 +807,10 @@ export function secrets({ repo, environment, profiles, dryRun, sessionsOnly = fa
   const list = [];
   if (!sessionsOnly) {
     const { email, token } = jiraConfig();
-    if (!email || !token) throw Error('Jira credentials are not configured.');
     list.push(
       { name: 'FORGE_TEST_CONFIG', value: JSON.stringify({ ...config(), state: undefined }) },
-      { name: 'JIRA_EMAIL', value: email },
-      { name: 'JIRA_API_KEY', value: token },
+      { name: 'ATLASSIAN_EMAIL', value: email },
+      { name: 'ATLASSIAN_API_TOKEN', value: token },
     );
   }
   for (const profile of profiles) {

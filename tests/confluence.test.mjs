@@ -19,23 +19,23 @@ const enable = () =>
   configure({ ...base, sites: [{ ...base.sites[0], products: ['confluence'] }] });
 
 test('a token request needs recorded Confluence access and credentials', async (t) => {
-  const saved = { email: process.env.JIRA_EMAIL, key: process.env.JIRA_API_KEY };
+  const saved = { email: process.env.ATLASSIAN_EMAIL, token: process.env.ATLASSIAN_API_TOKEN };
   t.after(() => {
     for (const [name, value] of [
-      ['JIRA_EMAIL', saved.email],
-      ['JIRA_API_KEY', saved.key],
+      ['ATLASSIAN_EMAIL', saved.email],
+      ['ATLASSIAN_API_TOKEN', saved.token],
     ])
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
   });
-  delete process.env.JIRA_EMAIL;
-  delete process.env.JIRA_API_KEY;
+  delete process.env.ATLASSIAN_EMAIL;
+  delete process.env.ATLASSIAN_API_TOKEN;
   configure(base);
   await assert.rejects(() => tokenRequest(), /Verified owned Confluence/);
   enable();
-  await assert.rejects(() => tokenRequest(), /credentials required/);
-  process.env.JIRA_EMAIL = 'tester@example.com';
-  process.env.JIRA_API_KEY = 'synthetic-token';
+  await assert.rejects(() => tokenRequest(), /Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN\./);
+  process.env.ATLASSIAN_EMAIL = 'tester@example.com';
+  process.env.ATLASSIAN_API_TOKEN = 'synthetic-token';
   const request = await tokenRequest(host);
   await request.dispose();
 });

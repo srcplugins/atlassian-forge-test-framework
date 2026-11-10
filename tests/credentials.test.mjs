@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './support/config.mjs';
 import { config, configure } from '../src/core/config.mjs';
-import { atlassianCredentials } from '../src/core/credentials.mjs';
+import { atlassianCredentials, requireCredentials } from '../src/core/credentials.mjs';
 
 // On Linux the token comes from the Secret Service through secret-tool. A stand-in on PATH
 // answers for one service name and fails for any other, like a missing item.
@@ -28,10 +28,7 @@ test(
 
     configure({ ...base, keychainService: 'acme-token' });
     assert.equal(atlassianCredentials({}).token, 'stored-token');
-    assert.equal(atlassianCredentials({ JIRA_API_KEY: 'from-env' }).token, 'from-env');
-    const both = { ATLASSIAN_API_TOKEN: 'neutral', JIRA_API_KEY: 'older' };
-    assert.equal(atlassianCredentials(both).token, 'neutral');
-    assert.equal(atlassianCredentials({ ATLASSIAN_EMAIL: 'a@x', JIRA_EMAIL: 'j@x' }).email, 'a@x');
+    assert.equal(atlassianCredentials({ ATLASSIAN_API_TOKEN: 'from-env' }).token, 'from-env');
     configure({ ...base, keychainService: 'other' });
     assert.equal(atlassianCredentials({}).token, undefined);
     configure(base);
@@ -41,3 +38,31 @@ test(
     assert.equal(atlassianCredentials({}).token, undefined);
   },
 );
+
+// One name pair: the names the Forge CLI itself reads are never an input here.
+test('only ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN name the account', () => {
+  const forge = { FORGE_EMAIL: 'forge@example.com', FORGE_API_TOKEN: 'forge-token' };
+  assert.deepEqual(atlassianCredentials(forge), { email: undefined, token: undefined });
+  const account = { ATLASSIAN_EMAIL: 'a@example.com', ATLASSIAN_API_TOKEN: 'token' };
+  assert.deepEqual(atlassianCredentials({ ...forge, ...account }), {
+    email: 'a@example.com',
+    token: 'token',
+  });
+});
+
+test('a missing credential fails naming the variable to set', () => {
+  const account = { ATLASSIAN_EMAIL: 'a@example.com', ATLASSIAN_API_TOKEN: 'token' };
+  assert.deepEqual(requireCredentials(account), { email: 'a@example.com', token: 'token' });
+  assert.throws(
+    () => requireCredentials({}),
+    /^Error: Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN\.$/,
+  );
+  assert.throws(
+    () => requireCredentials({ ATLASSIAN_EMAIL: 'a@example.com' }),
+    /^Error: Set ATLASSIAN_API_TOKEN\.$/,
+  );
+  assert.throws(
+    () => requireCredentials({ ATLASSIAN_API_TOKEN: 'token' }),
+    /^Error: Set ATLASSIAN_EMAIL\.$/,
+  );
+});

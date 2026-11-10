@@ -1,6 +1,6 @@
 import { request as playwrightRequest } from '@playwright/test';
 import { confluenceTarget } from './target.mjs';
-import { atlassianCredentials } from '../core/credentials.mjs';
+import { requireCredentials } from '../core/credentials.mjs';
 import { retryRead, safeRequest } from '../core/safe-request.mjs';
 
 /**
@@ -10,8 +10,7 @@ import { retryRead, safeRequest } from '../core/safe-request.mjs';
  */
 export async function tokenRequest(host) {
   confluenceTarget(host);
-  const { email, token } = atlassianCredentials();
-  if (!email || !token) throw Error('Owned Atlassian API credentials required');
+  const { email, token } = requireCredentials();
   return playwrightRequest.newContext({
     extraHTTPHeaders: {
       Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,

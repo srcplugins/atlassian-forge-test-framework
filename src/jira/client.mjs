@@ -89,8 +89,7 @@ export async function comments(api, id) {
 /** An API request context authenticated with the configured account, for the site under test. */
 export async function tokenRequest() {
   const c = jiraConfig();
-  if (`https://${c.site}` !== site() || !c.email || !c.token)
-    throw Error('Owned Jira API credentials required');
+  if (`https://${c.site}` !== site()) throw Error('Owned Jira API site required');
   return playwrightRequest.newContext({
     extraHTTPHeaders: {
       Authorization: `Basic ${Buffer.from(`${c.email}:${c.token}`).toString('base64')}`,

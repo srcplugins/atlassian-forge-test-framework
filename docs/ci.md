@@ -15,7 +15,7 @@ Run it again without `--dry-run` to set them. Fork pull requests never receive e
 | Secret | Holds |
 |---|---|
 | `FORGE_TEST_CONFIG` | The configuration JSON |
-| `JIRA_EMAIL`, `JIRA_API_KEY` | A dedicated API token for CI, not a personal one |
+| `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN` | The CI account's email and a dedicated API token for CI, not a personal one |
 | `JIRA_SESSION_<PROFILE>` | Saved sessions, gzip and base64. They expire about 30 days after their last use; `--dry-run` shows the dates, and `renew` followed by `secrets` keeps them current ([saved sessions](commands.md#saved-sessions)) |
 | `JIRA_IDENTITY_FIXTURE` | Pinned identity accounts, when used |
 | `CI_AGE_KEY` | An [age](https://age-encryption.org) identity that decrypts carried journals |
