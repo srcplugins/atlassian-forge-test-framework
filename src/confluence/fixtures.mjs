@@ -124,7 +124,7 @@ export async function prepareSpace(call, app, host) {
  * FixtureRun adapter for disposable pages in the fixture space. A page's title starts with its
  * run marker (`expected.marker`), which is how a lost create is found and ownership rechecked.
  */
-export function pageAdapter(call, space, runId) {
+export function pageAdapter(call, space, runId, { settleMs = 2000 } = {}) {
   const owned = (expected) =>
     isRunMarker(expected?.marker, runId) &&
     typeof expected.title === 'string' &&
@@ -160,7 +160,13 @@ export function pageAdapter(call, space, runId) {
     absent: async (expected) => (await find(expected)).length === 0,
     read,
     async verify(entry, current) {
-      const page = current ?? (await read(entry.id));
+      let page = current ?? (await read(entry.id));
+      // Confluence can answer 404 for a page for a moment after creating it, so a fresh create
+      // (no page passed in) is read up to four more times before its ownership is judged.
+      for (let i = 0; !page && current === undefined && i < 4; i++) {
+        await new Promise((resolve) => setTimeout(resolve, settleMs));
+        page = await read(entry.id);
+      }
       if (
         !owned(entry.expected) ||
         page?.title !== entry.expected.title ||

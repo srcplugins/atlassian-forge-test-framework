@@ -48,7 +48,7 @@ The first match wins:
 | `fixtures.projects` | Other named spaces, for example one used by a registered fixture profile |
 | `fixtures.identity` | The space whose isolated permission scheme holds the pinned identity accounts ([set up by hand](#identity-fixture)). It also holds the site lease that `forge-test suite` takes |
 | `fixtures.landing` | The work item `forge-test login` opens (required by `login`). Without `fixtures.identity`, its space holds the site lease |
-| `email`, `keychainService` | Optional. The account email (or `JIRA_EMAIL`), and on macOS a Keychain item holding the API token (or `JIRA_API_KEY`) |
+| `email`, `keychainService` | Optional. The account email (or `ATLASSIAN_EMAIL`), and a keyring item holding the API token (or `ATLASSIAN_API_TOKEN`): the macOS Keychain item with that service name, or on Linux the Secret Service item whose `service` attribute it is (`secret-tool store --label='Jira API token' service <name>`) |
 
 ### Advanced: renaming the namespace
 
@@ -65,7 +65,7 @@ If you change `namespace` while fixtures made under the old one are still on a s
 
 ## Credentials
 
-- **API:** `JIRA_EMAIL` and `JIRA_API_KEY` (a classic Atlassian API token). Without `JIRA_EMAIL`, the configuration's `email` is used, then `email` in `<state>/config.json`.
+- **API:** `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN` (a classic Atlassian API token), one account for every product; the older `JIRA_EMAIL` and `JIRA_API_KEY` still work and are what `forge-test secrets` writes for CI. Without an email variable, the configuration's `email` is used, then `email` in `<state>/config.json`.
 - **Forge CLI:** `FORGE_EMAIL` and `FORGE_API_TOKEN`, defaulting to the same values.
 
 Values are never printed. `prepare` needs a site administrator: it creates spaces.

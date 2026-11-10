@@ -1,5 +1,5 @@
 // Confluence variants of the CLI commands whose Jira versions act on Jira data. The API account
-// is the site's Atlassian account (JIRA_EMAIL and JIRA_API_KEY name it for both products).
+// is the site's Atlassian account (ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN, or the older JIRA_* names).
 import { config } from '../core/config.mjs';
 import { tokenRequest } from '../jira/client.mjs';
 import { confluenceCall, prepareSpace } from './fixtures.mjs';

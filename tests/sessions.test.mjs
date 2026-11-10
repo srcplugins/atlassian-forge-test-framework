@@ -3,8 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import './support/config.mjs';
-import { checkSessions, renewalOutcome, secrets } from '../src/jira/commands.mjs';
+import {
+  checkSessions,
+  renewalOutcome,
+  secrets,
+  sessionLines,
+  sessionReport,
+} from '../src/jira/commands.mjs';
 import { browserTarget } from '../src/core/target.mjs';
+import { primary } from './support/config.mjs';
 
 // Saved sessions are checked before a run signs in with them: a lapsed sign-in must refuse the run with what to do, never show up as a failing test.
 const now = new Date('2026-10-22T12:00:00Z');
@@ -136,4 +143,141 @@ test('secrets --sessions-only copies just the named sessions, never the configur
     lines[0],
     /^Would set JIRA_SESSION_MEMBER \(\d+ bytes; session expires 2999-01-01\)$/,
   );
+});
+
+// `sessions` tells which saved session is whose without printing account IDs, and reads nothing
+// from Jira unless asked to verify.
+function savedSite({ pins = true } = {}) {
+  const base = mkdtempSync(`${tmpdir()}/site-`);
+  const target = {
+    host: primary,
+    site: `https://${primary}`,
+    directory: `${base}/e2e`,
+    authDirectory: `${base}/browser-auth`,
+  };
+  mkdirSync(target.directory, { recursive: true });
+  mkdirSync(target.authDirectory, { recursive: true });
+  const save = (profile, iso) =>
+    writeFileSync(
+      `${target.authDirectory}/${profile}.json`,
+      JSON.stringify({ cookies: [cookie('tenant.session.token', iso)], origins: [] }),
+    );
+  save('admin', '2026-11-20T00:00:00Z');
+  save('admin2', '2026-11-21T00:00:00Z');
+  save('member', '2026-11-22T00:00:00Z');
+  save('restricted', '2026-10-20T00:00:00Z');
+  if (pins)
+    writeFileSync(
+      `${target.directory}/identity-fixture.json`,
+      JSON.stringify({
+        site: `https://${primary}`,
+        project: { id: '10001', key: 'AUTH' },
+        scheme: { id: '10002' },
+        actors: {
+          owner: 'synthetic-owner-1111',
+          member: 'synthetic-member-2222',
+          restricted: 'synthetic-restricted-3333',
+        },
+      }),
+    );
+  return { base, target };
+}
+
+test('sessions lists saved dates without asking Jira unless told to verify', async () => {
+  const { base, target } = savedSite();
+  try {
+    const report = await sessionReport(['admin', 'restricted', 'nc-user'], {
+      target,
+      now,
+      ask: assert.fail,
+    });
+    assert.equal(report.verified, false);
+    assert.deepEqual(
+      report.sessions.map((s) => [s.profile, s.expires, s.expired ?? null, s.missing ?? false]),
+      [
+        ['admin', '2026-11-20T00:00:00.000Z', false, false],
+        ['restricted', '2026-10-20T00:00:00.000Z', true, false],
+        ['nc-user', undefined, null, true],
+      ],
+    );
+    assert.match(report.sessions[0].saved, /^\d{4}-\d{2}-\d{2}T/);
+    const lines = sessionLines(report);
+    assert.match(lines[0], /^admin: signed in until 2026-11-20, saved \d{4}-\d{2}-\d{2}\.$/);
+    assert.match(lines[1], /^restricted: expired 2026-10-20, saved /);
+    assert.equal(lines[2], 'nc-user: missing; run forge-test login nc-user.');
+    await assert.rejects(sessionReport(['Admin'], { target }), /lowercase profile name/);
+  } finally {
+    rmSync(base, { recursive: true });
+  }
+});
+
+test('sessions --verify names the pinned role each account matches, never the account ID', async () => {
+  const { base, target } = savedSite();
+  // admin2 was signed in as the owner by mistake; member is signed out; restricted has expired.
+  const accounts = {
+    admin: 'synthetic-owner-1111',
+    admin2: 'synthetic-owner-1111',
+    member: null,
+  };
+  const asked = [];
+  try {
+    const report = await sessionReport([], {
+      verify: true,
+      target,
+      now,
+      ask: async (file, site) => {
+        const profile = file.split('/').pop().slice(0, -'.json'.length);
+        asked.push([profile, site]);
+        return accounts[profile];
+      },
+    });
+    assert.deepEqual(asked, [
+      ['admin', `https://${primary}`],
+      ['admin2', `https://${primary}`],
+      ['member', `https://${primary}`],
+    ]);
+    assert.equal(report.pins, true);
+    const verify = Object.fromEntries(report.sessions.map((s) => [s.profile, s.verify]));
+    assert.deepEqual(verify.admin, {
+      signedIn: true,
+      account: '…1111',
+      pin: 'owner',
+      sameAs: ['admin2'],
+    });
+    assert.deepEqual(verify.member, { signedIn: false });
+    assert.equal(verify.restricted, undefined);
+    const text = sessionLines(report).join('\n');
+    assert.match(
+      text,
+      /^admin2: .*; signed in as the pinned owner account \(…1111\); same account as admin\.$/m,
+    );
+    assert.match(text, /^member: .*; Jira returned no account \(signed out\)\.$/m);
+    assert.doesNotMatch(text, /synthetic-/);
+  } finally {
+    rmSync(base, { recursive: true });
+  }
+});
+
+test('sessions --verify without pins, or without an answer, says so', async () => {
+  const { base, target } = savedSite({ pins: false });
+  try {
+    const report = await sessionReport(['admin', 'member'], {
+      verify: true,
+      target,
+      now,
+      ask: async (file) => {
+        if (file.endsWith('/member.json')) throw Error('Jira answered HTTP 500');
+        return 'synthetic-owner-1111';
+      },
+    });
+    assert.equal(report.pins, false);
+    assert.equal(report.sessions[0].verify.pin, null);
+    assert.deepEqual(report.sessions[1].verify, { error: 'Jira answered HTTP 500' });
+    const lines = sessionLines(report);
+    assert.match(lines[0], /signed in as an unpinned account \(…1111\)\.$/);
+    assert.match(lines[1], /not verified \(Jira answered HTTP 500\)\.$/);
+    assert.equal(lines[2], 'No identity pins for this site; accounts were not compared.');
+  } finally {
+    rmSync(base, { recursive: true });
+  }
 });

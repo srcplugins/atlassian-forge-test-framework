@@ -12,12 +12,18 @@ import { client } from './client.mjs';
 import { activeTarget } from '../core/target.mjs';
 
 // The owner's Jira theme preference, journaled and restored. Its menu is in Jira's account menu,
-// reached from any Jira page; `themePage` is a site-relative path.
+// reached from any Jira page; `themePage` is a site-relative path. The preference belongs to the
+// account every run on the site signs in as, so a lane that shares the site (`leaseUses`) can't
+// change it.
 export const test = base.extend({
   themePage: ['/jira/your-work', { option: true }],
   theme: async ({ page, context, jiraRequest, themePage }, use) => {
     if (typeof themePage !== 'string' || !themePage.startsWith('/'))
       throw Error('themePage must be a site-relative path, for example /jira/your-work.');
+    if (process.env.FORGE_TEST_LEASE_USES)
+      throw Error(
+        'Changing the theme changes it for every run on the site; remove leaseUses from forge-test.mjs so this app takes the whole site.',
+      );
     const open = () =>
       page.goto(`${activeTarget().site}${themePage}`, { waitUntil: 'domcontentloaded' });
     const owner = await client(jiraRequest)('/myself');

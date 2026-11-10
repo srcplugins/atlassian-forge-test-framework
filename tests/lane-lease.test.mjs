@@ -1,7 +1,8 @@
+import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import './support/config.mjs';
-import { lane, laneLease, leaseHolder, leaseReport } from '../src/jira/commands.mjs';
+import { lane, laneLease, leaseHolder, leaseReport, stopOnSignal } from '../src/jira/commands.mjs';
 import { leaseSite } from './support/lease-site.mjs';
 
 // A lane shares the fixture spaces of every run on the site, so it holds the site lease while it
@@ -59,6 +60,50 @@ test('a lane holds the site while Playwright runs and releases it after, even on
     ]);
     assert.equal(s.property, undefined);
   }
+});
+
+test('a stop signal marks the run stopped; a second releases the lease at once and exits', async () => {
+  const process = new EventEmitter();
+  const exits = [];
+  let released = 0;
+  const logs = [];
+  const signals = stopOnSignal(async () => released++, {
+    on: process,
+    exit: (code) => exits.push(code),
+    log: (line) => logs.push(line),
+  });
+  assert.equal(signals.stopped(), null);
+  process.emit('SIGINT', 'SIGINT');
+  assert.equal(signals.stopped(), 'SIGINT');
+  assert.equal(released, 0, 'the first signal leaves the step to end on its own');
+  process.emit('SIGTERM', 'SIGTERM');
+  process.emit('SIGTERM', 'SIGTERM');
+  await new Promise((done) => setImmediate(done));
+  assert.equal(released, 1);
+  assert.deepEqual(exits, [143]);
+  assert.match(logs[0], /^SIGINT: stopping after the current step/);
+  signals.dispose();
+  assert.equal(process.listenerCount('SIGINT'), 0);
+  assert.equal(process.listenerCount('SIGTERM'), 0);
+});
+
+test('a stopped lane releases the site at once on a second signal', async () => {
+  const s = leaseSite();
+  const process = new EventEmitter();
+  const exits = [];
+  const onSignal = (stop, options) =>
+    stopOnSignal(stop, { ...options, on: process, exit: (code) => exits.push(code) });
+  const release = await hold(s, { onSignal })({});
+  assert.equal(s.property.holder, 'a local lane');
+  process.emit('SIGINT', 'SIGINT');
+  assert.equal(s.property.holder, 'a local lane');
+  process.emit('SIGINT', 'SIGINT');
+  await new Promise((done) => setTimeout(done, 0));
+  assert.equal(s.property, undefined);
+  assert.deepEqual(exits, [130]);
+  await release(); // The lane's own release afterwards does nothing more.
+  assert.equal(process.listenerCount('SIGINT'), 0);
+  assert.equal(s.deletes, 1);
 });
 
 test('a lane renews the lease while it runs', async (t) => {
@@ -134,5 +179,35 @@ test('forge-test lease reports the holder in words or JSON', () => {
     heldMinutes: 42,
     expires: '2030-01-01T10:51:00.000Z',
     priorityWaiting: 'org/plugin run 9',
+    holders: [
+      {
+        holder: 'org/plugin run 7',
+        uses: null,
+        since: '2030-01-01T10:00:00.000Z',
+        expires: '2030-01-01T10:51:00.000Z',
+      },
+    ],
   });
+  // Runs sharing the site are each listed with what they use.
+  const shared = {
+    ...status,
+    priorityWaiting: null,
+    holders: [
+      { ...status, uses: ['app:filter-history'] },
+      {
+        ...status,
+        holder: 'a local lane',
+        since: Date.UTC(2030, 0, 1, 10, 40),
+        uses: ['confluence:PLSLABEL'],
+      },
+    ],
+  };
+  assert.equal(
+    leaseReport(shared, { now: Date.UTC(2030, 0, 1, 10, 42) }),
+    [
+      'The site is shared by 2 runs:',
+      '- org/plugin run 7 (sharing: app:filter-history), for 42 minutes; it lapses in 9 minutes unless renewed.',
+      '- a local lane (sharing: confluence:PLSLABEL), for 2 minutes; it lapses in 9 minutes unless renewed.',
+    ].join('\n'),
+  );
 });

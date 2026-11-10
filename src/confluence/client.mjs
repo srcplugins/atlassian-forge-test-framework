@@ -1,5 +1,24 @@
+import { request as playwrightRequest } from '@playwright/test';
 import { confluenceTarget } from './target.mjs';
+import { atlassianCredentials } from '../core/credentials.mjs';
 import { retryRead, safeRequest } from '../core/safe-request.mjs';
+
+/**
+ * An API request context authenticated with the configured account, for an owned site with
+ * recorded Confluence access (the primary by default). Pass it to `client`, or use it for the
+ * reads `client` doesn't cover. Dispose of it when done.
+ */
+export async function tokenRequest(host) {
+  confluenceTarget(host);
+  const { email, token } = atlassianCredentials();
+  if (!email || !token) throw Error('Owned Atlassian API credentials required');
+  return playwrightRequest.newContext({
+    extraHTTPHeaders: {
+      Authorization: `Basic ${Buffer.from(`${email}:${token}`).toString('base64')}`,
+      Accept: 'application/json',
+    },
+  });
+}
 
 /**
  * Read-only foundation; writes require future journaled Confluence fixture adapters. A read that

@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { configure, validateConfig } from '../src/core/config.mjs';
 import {
   client,
+  tokenRequest,
   confluenceTarget,
   spacePath,
   pagePath,
@@ -16,6 +17,28 @@ const base = { namespace: 'synthetic', sites: [{ role: 'primary', host }] };
 const uuid = '0b1c2d3e-4f50-4617-8899-aabbccddeeff';
 const enable = () =>
   configure({ ...base, sites: [{ ...base.sites[0], products: ['confluence'] }] });
+
+test('a token request needs recorded Confluence access and credentials', async (t) => {
+  const saved = { email: process.env.JIRA_EMAIL, key: process.env.JIRA_API_KEY };
+  t.after(() => {
+    for (const [name, value] of [
+      ['JIRA_EMAIL', saved.email],
+      ['JIRA_API_KEY', saved.key],
+    ])
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+  delete process.env.JIRA_EMAIL;
+  delete process.env.JIRA_API_KEY;
+  configure(base);
+  await assert.rejects(() => tokenRequest(), /Verified owned Confluence/);
+  enable();
+  await assert.rejects(() => tokenRequest(), /credentials required/);
+  process.env.JIRA_EMAIL = 'tester@example.com';
+  process.env.JIRA_API_KEY = 'synthetic-token';
+  const request = await tokenRequest(host);
+  await request.dispose();
+});
 
 test('Confluence requires independently recorded product access and isolates private state', () => {
   configure(base);

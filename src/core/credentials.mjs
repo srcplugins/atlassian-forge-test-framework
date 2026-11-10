@@ -3,13 +3,21 @@ import { spawnSync } from 'node:child_process';
 import { config, ownedSites, siteFor, stateRoot } from './config.mjs';
 
 // Atlassian account credentials for connected tooling (Jira REST and the Forge CLI): the
-// environment first, then optionally the macOS Keychain item named by the configuration's
-// keychainService. Values are never logged or written anywhere.
+// environment first, then optionally the keyring item named by the configuration's
+// keychainService: the macOS Keychain, or the Secret Service on Linux (libsecret's secret-tool).
+// A missing tool or item gives no token, never an error. Values are never logged or written.
+const keyringLookups = {
+  darwin: (service) => ['security', ['find-generic-password', '-s', service, '-w']],
+  linux: (service) => ['secret-tool', ['lookup', 'service', service]],
+};
 function keychainToken(service) {
-  if (!service || process.platform !== 'darwin') return undefined;
-  const result = spawnSync('security', ['find-generic-password', '-s', service, '-w'], {
+  const lookup = keyringLookups[process.platform];
+  if (!service || !lookup) return undefined;
+  const [command, args] = lookup(service);
+  const result = spawnSync(command, args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000,
   });
   return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 }
@@ -24,9 +32,11 @@ function localEmail() {
   }
 }
 
+// ATLASSIAN_* name the one account for every product; the older JIRA_* names still work.
 export function atlassianCredentials(env = process.env) {
-  const email = env.JIRA_EMAIL || config().email || localEmail();
-  const token = env.JIRA_API_KEY || keychainToken(config().keychainService);
+  const email = env.ATLASSIAN_EMAIL || env.JIRA_EMAIL || config().email || localEmail();
+  const token =
+    env.ATLASSIAN_API_TOKEN || env.JIRA_API_KEY || keychainToken(config().keychainService);
   return {
     email,
     token,

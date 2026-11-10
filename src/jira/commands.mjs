@@ -5,13 +5,14 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { chromium } from '@playwright/test';
+import { chromium, request as playwrightRequest } from '@playwright/test';
 import { config, daysUntilExpiry, landingIssue, ownedSites, siteFor } from '../core/config.mjs';
 import { jiraConfig } from '../core/credentials.mjs';
 import { laneProject, lanes } from '../core/lanes.mjs';
@@ -19,9 +20,10 @@ import { isMarker, markers } from '../core/markers.mjs';
 import { retryRead, safeRequest } from '../core/safe-request.mjs';
 import { activeTarget, browserTarget } from '../core/target.mjs';
 import { client, projects, tokenRequest } from './client.mjs';
+import { validateIdentityFixture } from './identity.mjs';
 import { openRun } from './run.mjs';
 import { sitePreflight } from './site-preflight.mjs';
-import { heldFor, siteLease } from './site-lease.mjs';
+import { heldFor, leaseUses, siteLease } from './site-lease.mjs';
 import { runSuite } from '../core/suite.mjs';
 
 // Implementations of the forge-test commands (bin/forge-test.mjs). Each refuses anything but an
@@ -29,21 +31,24 @@ import { runSuite } from '../core/suite.mjs';
 
 /**
  * Runs a suite while holding the site lease, so suites from other repositories or machines on
- * the same site wait. The lease is renewed on a timer and confirmed again right before each
+ * the same site wait (or, with `uses`, only those that conflict with it). The lease is renewed on a timer and confirmed again right before each
  * step; a failed renewal retries on the next tick, and a lost lease stops the suite before its
  * next step or cleanup. FORGE_TEST_LEASE_PRIORITY=1 (a release or landing run) goes ahead of
  * other waiters; any other suite gives the site to a waiting priority run between steps, waits
- * up to `resumeWithin` for it to finish, and continues after its prerequisites run again.
+ * up to `resumeWithin` for it to finish, and continues after its prerequisites run again. A
+ * stopped suite (SIGINT, SIGTERM, SIGHUP) ends after its current step and releases the lease; a
+ * second signal releases it at once (`stopOnSignal`).
  */
 export async function suite(
   title,
   steps,
-  { renewEvery = 5 * 60_000, resumeWithin = 120 * 60_000 } = {},
+  { renewEvery = 5 * 60_000, resumeWithin = 120 * 60_000, uses } = {},
 ) {
   checkSessions(activeTarget().authDirectory);
   const lease = siteLease(client(await tokenRequest()), {
     holder: leaseHolder('suite'),
     priority: process.env.FORGE_TEST_LEASE_PRIORITY === '1',
+    uses,
   });
   await lease.acquire();
   let lost;
@@ -53,11 +58,17 @@ export async function suite(
       if (error.leaseLost) lost = error;
     }));
   const timer = setInterval(renew, renewEvery);
+  const signals = stopOnSignal(async () => {
+    clearInterval(timer);
+    await renewing;
+    await lease.release();
+  });
   try {
     return await runSuite(title, steps, {
       // Its lanes run under this lease instead of waiting for it.
       env: { ...process.env, FORGE_TEST_LEASE: lease.id },
       before: async () => {
+        if (signals.stopped()) throw Error(`the run was stopped (${signals.stopped()})`);
         await renew();
         if (lost) throw lost;
       },
@@ -76,6 +87,7 @@ export async function suite(
       receipt: suiteReceipt(title),
     });
   } finally {
+    signals.dispose();
     clearInterval(timer);
     // A renewal still in flight must settle before release, so it cannot recreate the lease.
     await renewing;
@@ -83,6 +95,44 @@ export async function suite(
       .release()
       .catch(() => console.error('Could not release the site lease; it expires on its own.'));
   }
+}
+
+const signalCodes = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
+
+/**
+ * Keeps a held site lease from outliving a stopped run, where it would block the site until it
+ * lapses. The first SIGINT, SIGTERM or SIGHUP only marks the run stopped: the step or Playwright
+ * process gets the same signal from the terminal or the CI runner, and the run ends after it and
+ * releases the lease as usual. A second signal (a CI runner sends SIGTERM a few seconds after
+ * SIGINT) calls `release` at once and exits with that signal's code. `dispose` removes the
+ * handlers.
+ */
+export function stopOnSignal(
+  release,
+  { on = process, exit = (code) => process.exit(code), log = console.error } = {},
+) {
+  let stopped = null;
+  let releasing;
+  const handler = (signal) => {
+    if (!stopped) {
+      stopped = signal;
+      log(
+        `${signal}: stopping after the current step, then releasing the site lease (another signal releases it now).`,
+      );
+      return;
+    }
+    releasing ??= Promise.resolve()
+      .then(release)
+      .catch(() => log('Could not release the site lease; it expires on its own.'))
+      .finally(() => exit(signalCodes[signal]));
+  };
+  for (const signal of Object.keys(signalCodes)) on.on(signal, handler);
+  return {
+    stopped: () => stopped,
+    dispose: () => {
+      for (const signal of Object.keys(signalCodes)) on.off(signal, handler);
+    },
+  };
 }
 
 const holderLabel = /^[\w .,:#/@()+-]{1,80}$/;
@@ -122,7 +172,8 @@ export function fixturesClean(directory = activeTarget().runs) {
 
 export async function doctor() {
   const cfg = jiraConfig();
-  if (!cfg.email || !cfg.token) throw Error('Set JIRA_EMAIL and JIRA_API_KEY.');
+  if (!cfg.email || !cfg.token)
+    throw Error('Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN (or JIRA_EMAIL and JIRA_API_KEY).');
   // Read-only, so a GET that fails on transport or with HTTP 502, 503 or 504 runs once more.
   const get = (path) =>
     retryRead(
@@ -299,7 +350,14 @@ export async function cleanup(app, runId) {
  */
 export async function laneLease(
   env,
-  { api, renewEvery = 5 * 60_000, lease = siteLease, log = console.error } = {},
+  {
+    api,
+    renewEvery = 5 * 60_000,
+    lease = siteLease,
+    log = console.error,
+    onSignal = stopOnSignal,
+    uses,
+  } = {},
 ) {
   const request = api ? null : await tokenRequest();
   const dispose = async () => request?.dispose();
@@ -312,7 +370,7 @@ export async function laneLease(
     );
   let held;
   try {
-    held = lease(api ?? client(request), { holder: leaseHolder('lane', env) });
+    held = lease(api ?? client(request), { holder: leaseHolder('lane', env), uses });
     if (env.FORGE_TEST_LEASE) {
       const status = await held.status(env.FORGE_TEST_LEASE);
       if (status && !status.own) throw busy(status);
@@ -340,13 +398,17 @@ export async function laneLease(
       }
     });
   }, renewEvery);
-  return async () => {
+  const stop = async () => {
     clearInterval(timer);
     // A renewal still in flight must settle before release, so it cannot recreate the lease.
     await renewing;
-    await held
-      .release()
-      .catch(() => log('Could not release the site lease; it expires on its own.'));
+    await held.release();
+  };
+  // Playwright gets a stop signal too and ends the lane, which then releases as below.
+  const signals = onSignal(stop, { log });
+  return async () => {
+    signals.dispose();
+    await stop().catch(() => log('Could not release the site lease; it expires on its own.'));
     await dispose();
   };
 }
@@ -369,13 +431,16 @@ export async function lane(
   extra = [],
   {
     configFile = 'playwright.config.mjs',
-    hold = laneLease,
+    uses,
+    hold = (env) => laneLease(env, { uses }),
     run = (args, env) => exitCode(process.execPath, args, { env }),
   } = {},
 ) {
   if (!Object.hasOwn(lanes, name ?? ''))
     throw Error(`Usage: forge-test lane <${Object.keys(lanes).join('|')}> [-- Playwright args]`);
   const env = { ...process.env, E2E_LANE: name };
+  // A lane that shares the site tells its journeys, so ones that change account-wide state refuse.
+  if (uses) env.FORGE_TEST_LEASE_USES = leaseUses(uses).join(',');
   laneProject(name, env);
   const host = env.PLUGIN_TEST_SITE || env.JIRA_SITE || siteFor('primary');
   const days = daysUntilExpiry(host);
@@ -407,22 +472,35 @@ export async function leaseStatus({ api } = {}) {
 
 /** The `forge-test lease` lines (or JSON) for a status from `leaseStatus`. */
 export function leaseReport(status, { json = false, now = Date.now() } = {}) {
+  // A status from an earlier version names one holder of the whole site.
+  const holders = status ? (status.holders ?? [{ ...status, uses: null }]) : [];
+  const iso = (ms) => (ms === null ? null : new Date(ms).toISOString());
   if (json)
     return JSON.stringify(
       status
         ? {
             held: true,
             holder: status.holder,
-            since: status.since === null ? null : new Date(status.since).toISOString(),
+            since: iso(status.since),
             heldMinutes: status.heldMs === null ? null : Math.floor(status.heldMs / 60_000),
-            expires: new Date(status.expires).toISOString(),
+            expires: iso(status.expires),
             priorityWaiting: status.priorityWaiting,
+            holders: holders.map((value) => ({
+              holder: value.holder,
+              uses: value.uses,
+              since: iso(value.since),
+              expires: iso(value.expires),
+            })),
           }
         : { held: false },
     );
   if (!status) return 'The site lease is free.';
+  const line = (value) =>
+    `${value.holder}${value.uses ? ` (sharing: ${value.uses.join(', ')})` : ''}, for ${heldFor(value.since === null ? null : now - value.since)}; it lapses in ${heldFor(value.expires - now)} unless renewed.`;
   return [
-    `The site lease is held by ${status.holder}, for ${heldFor(status.heldMs)}; it lapses in ${heldFor(status.expires - now)} unless renewed.`,
+    holders.length === 1
+      ? `The site lease is held by ${line(holders[0])}`
+      : `The site is shared by ${holders.length} runs:\n${holders.map((value) => `- ${line(value)}`).join('\n')}`,
     ...(status.priorityWaiting ? [`${status.priorityWaiting} is waiting to go first.`] : []),
   ].join('\n');
 }
@@ -593,6 +671,127 @@ export async function renew(profiles = [], { now = new Date(), settle = 20_000 }
     await browser.close();
   }
   return failed === 0;
+}
+
+/** Which saved session is whose: an account ID shortened to its last four characters. */
+const shortAccount = (id) => `…${String(id).slice(-4)}`;
+
+/** The pinned identity accounts on the site under test (owner, member, restricted), or null. */
+function identityPins(target) {
+  try {
+    const value = JSON.parse(readFileSync(`${target.directory}/identity-fixture.json`, 'utf8'));
+    return validateIdentityFixture(value, target.host).actors;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The account a saved session signs in as, from Jira's /myself through that session (no browser,
+ * no redirects), or null when Jira returns none (signed out). A dropped connection is retried once.
+ */
+async function sessionAccount(file, site) {
+  const context = await playwrightRequest.newContext({ storageState: file });
+  try {
+    return await retryRead(
+      async () => {
+        const response = await safeRequest(
+          () =>
+            context.get(`${site}/rest/api/3/myself`, {
+              maxRedirects: 0,
+              timeout: 20_000,
+              headers: { Accept: 'application/json' },
+            }),
+          'GET fetch',
+        );
+        if (!response.ok()) return { status: response.status(), accountId: null };
+        const body = await safeRequest(() => response.json(), 'GET body read').catch(() => null);
+        return { status: response.status(), accountId: body?.accountId ?? null };
+      },
+      { label: 'Jira GET', status: (r) => r.status },
+    ).then(({ status, accountId }) => {
+      // 401 or 403, or a redirect to the sign-in page: signed out. Anything else is no answer.
+      if (status === 200 || status === 401 || status === 403 || (status >= 300 && status < 400))
+        return accountId;
+      throw Error(`Jira answered HTTP ${status}`);
+    });
+  } finally {
+    await context.dispose();
+  }
+}
+
+/**
+ * Read-only report of the saved sessions on the site under test (or the named profiles): when
+ * each was saved and when its sign-in lapses. With `verify`, it also asks Jira who each unexpired
+ * session is and compares the account with the identity pins: `pin` names the pinned role it
+ * matches (owner, member or restricted) or is null, and `sameAs` lists the other reported profiles
+ * with the same account. Accounts appear only shortened (`…abcd`); nothing else from Jira is kept.
+ * `ask(file, site)` resolves the account ID for a session file, or null when signed out.
+ */
+export async function sessionReport(
+  profiles = [],
+  { verify = false, target = activeTarget(), now = new Date(), ask = sessionAccount } = {},
+) {
+  for (const profile of profiles)
+    if (!profileName.test(profile)) throw Error('Use a lowercase profile name, such as admin.');
+  const saved = checkSessions(target.authDirectory, { now: new Date(0), warn: () => {} });
+  const names = profiles.length ? profiles : saved.map((s) => s.profile);
+  const sessions = names.map((profile) => {
+    const file = `${target.authDirectory}/${profile}.json`;
+    if (!existsSync(file)) return { profile, missing: true };
+    const { expires } = saved.find((s) => s.profile === profile) ?? { expires: null };
+    return {
+      profile,
+      saved: statSync(file).mtime.toISOString(),
+      expires: expires?.toISOString() ?? null,
+      expired: !!(expires && expires <= now),
+    };
+  });
+  if (!verify) return { verified: false, sessions };
+  const pins = identityPins(target);
+  const accounts = new Map();
+  for (const session of sessions) {
+    if (session.missing || session.expired) continue;
+    try {
+      accounts.set(
+        session.profile,
+        await ask(`${target.authDirectory}/${session.profile}.json`, target.site),
+      );
+    } catch (error) {
+      session.verify = { error: error.message };
+    }
+  }
+  for (const session of sessions) {
+    if (!accounts.has(session.profile)) continue;
+    const account = accounts.get(session.profile);
+    session.verify = account
+      ? {
+          signedIn: true,
+          account: shortAccount(account),
+          pin: Object.entries(pins ?? {}).find(([, id]) => id === account)?.[0] ?? null,
+          sameAs: [...accounts]
+            .filter(([other, id]) => other !== session.profile && id === account)
+            .map(([other]) => other),
+        }
+      : { signedIn: false };
+  }
+  return { verified: true, pins: !!pins, sessions };
+}
+
+/** The `forge-test sessions` lines for a `sessionReport`. */
+export function sessionLines({ verified, pins, sessions }) {
+  const lines = sessions.map((s) => {
+    if (s.missing) return `${s.profile}: missing; run forge-test login ${s.profile}.`;
+    const dates = `${s.expired ? 'expired' : 'signed in until'} ${s.expires ? day(new Date(s.expires)) : 'an undated time'}, saved ${day(new Date(s.saved))}`;
+    if (!s.verify) return `${s.profile}: ${dates}.`;
+    if (s.verify.error) return `${s.profile}: ${dates}; not verified (${s.verify.error}).`;
+    if (!s.verify.signedIn) return `${s.profile}: ${dates}; Jira returned no account (signed out).`;
+    const who = s.verify.pin ? `the pinned ${s.verify.pin} account` : 'an unpinned account';
+    const same = s.verify.sameAs.length ? `; same account as ${s.verify.sameAs.join(', ')}` : '';
+    return `${s.profile}: ${dates}; signed in as ${who} (${s.verify.account})${same}.`;
+  });
+  if (verified && !pins) lines.push('No identity pins for this site; accounts were not compared.');
+  return lines;
 }
 
 /**
