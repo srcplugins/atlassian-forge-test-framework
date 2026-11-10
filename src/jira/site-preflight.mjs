@@ -7,7 +7,7 @@ import { ownedSites } from '../core/config.mjs';
 // more (`retryRead`).
 export async function sitePreflight({ site, email, token, fetchImpl = fetch, retry = {} }) {
   if (!ownedSites().includes(site)) throw Error('Explicitly owned audit site required.');
-  if (!email || !token) throw Error('Jira credentials required.');
+  if (!email || !token) throw Error('Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN.');
   const results = {};
   const read = (path) =>
     retryRead(

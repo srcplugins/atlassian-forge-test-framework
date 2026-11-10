@@ -3,13 +3,21 @@ import { spawnSync } from 'node:child_process';
 import { config, ownedSites, siteFor, stateRoot } from './config.mjs';
 
 // Atlassian account credentials for connected tooling (Jira REST and the Forge CLI): the
-// environment first, then optionally the macOS Keychain item named by the configuration's
-// keychainService. Values are never logged or written anywhere.
+// environment first, then optionally the keyring item named by the configuration's
+// keychainService: the macOS Keychain, or the Secret Service on Linux (libsecret's secret-tool).
+// A missing tool or item gives no token, never an error. Values are never logged or written.
+const keyringLookups = {
+  darwin: (service) => ['security', ['find-generic-password', '-s', service, '-w']],
+  linux: (service) => ['secret-tool', ['lookup', 'service', service]],
+};
 function keychainToken(service) {
-  if (!service || process.platform !== 'darwin') return undefined;
-  const result = spawnSync('security', ['find-generic-password', '-s', service, '-w'], {
+  const lookup = keyringLookups[process.platform];
+  if (!service || !lookup) return undefined;
+  const [command, args] = lookup(service);
+  const result = spawnSync(command, args, {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: 10_000,
   });
   return result.status === 0 ? result.stdout.trim() || undefined : undefined;
 }
@@ -24,20 +32,30 @@ function localEmail() {
   }
 }
 
+// ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN name the one account for every product and for the
+// Forge CLI; no other variable is read. The configuration and the keyring are where a machine
+// stores the same two values.
 export function atlassianCredentials(env = process.env) {
-  const email = env.JIRA_EMAIL || config().email || localEmail();
-  const token = env.JIRA_API_KEY || keychainToken(config().keychainService);
   return {
-    email,
-    token,
-    forgeEmail: env.FORGE_EMAIL || email,
-    forgeToken: env.FORGE_API_TOKEN || token,
+    email: env.ATLASSIAN_EMAIL || config().email || localEmail(),
+    token: env.ATLASSIAN_API_TOKEN || keychainToken(config().keychainService),
   };
+}
+
+/** The account's credentials, or an error naming each variable that is missing. */
+export function requireCredentials(env = process.env) {
+  const credentials = atlassianCredentials(env);
+  const missing = [
+    !credentials.email && 'ATLASSIAN_EMAIL',
+    !credentials.token && 'ATLASSIAN_API_TOKEN',
+  ].filter(Boolean);
+  if (missing.length) throw Error(`Set ${missing.join(' and ')}.`);
+  return credentials;
 }
 
 /** The selected API site (JIRA_SITE or the primary role) with credentials. */
 export function jiraConfig(env = process.env) {
-  return { site: apiSite(env), ...atlassianCredentials(env) };
+  return { site: apiSite(env), ...requireCredentials(env) };
 }
 
 /** The selected API site: JIRA_SITE or the primary role, always an owned site. */

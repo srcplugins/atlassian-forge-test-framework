@@ -32,9 +32,11 @@ function setup(t) {
 
 /**
  * An in-memory Confluence holding spaces, pages, labels and read restrictions. `fail` names
- * requests ("METHOD path-prefix") whose response is lost after the change is applied.
+ * requests ("METHOD path-prefix") whose response is lost after the change is applied; `lagging`
+ * is how many reads of a new page answer 404 before it shows, as Confluence's can.
  */
-function site({ fail = [], refuse = {} } = {}) {
+function site({ fail = [], refuse = {}, lagging = 0 } = {}) {
+  const unseen = new Map();
   const spaces = [];
   const pages = new Map();
   const calls = [];
@@ -62,14 +64,17 @@ function site({ fail = [], refuse = {} } = {}) {
       } else if (route === 'POST /wiki/api/v2/pages') {
         const id = String(next++);
         pages.set(id, { id, ...data, labels: [], read: [] });
+        unseen.set(id, lagging);
         response = json(200, { id });
       } else if (/^GET \/wiki\/api\/v2\/spaces\/\d+\/pages$/.test(route))
         response = json(200, {
           results: [...pages.values()].filter((p) => p.title === searchParams.get('title')),
         });
-      else if (/^GET \/wiki\/api\/v2\/pages\/\d+$/.test(route))
-        response = page ? json(200, page) : json(404, {});
-      else if (/^DELETE \/wiki\/api\/v2\/pages\/\d+$/.test(route)) {
+      else if (/^GET \/wiki\/api\/v2\/pages\/\d+$/.test(route)) {
+        const lag = unseen.get(page?.id) ?? 0;
+        if (lag) unseen.set(page.id, lag - 1);
+        response = page && !lag ? json(200, page) : json(404, {});
+      } else if (/^DELETE \/wiki\/api\/v2\/pages\/\d+$/.test(route)) {
         if (!page) response = json(404, {});
         else if (searchParams.get('purge') === 'true') {
           pages.delete(page.id);
@@ -167,6 +172,31 @@ test('pages are journaled, rechecked and purged; a lost create is found by its m
     fake.calls.filter((c) => c.route.startsWith('DELETE')).map((c) => c.search),
     ['', 'purge=true'],
   );
+});
+
+test('a new page that reads as missing for a moment is read again before its ownership is judged', async (t) => {
+  setup(t);
+  const space = { id: '7', key: 'EX' };
+  const marker = markers.runMarker(runId, 0);
+  const expected = { marker, title: `${marker} Synthetic page` };
+  const create = (fake) =>
+    FixtureRun.create({
+      app: 'example',
+      site: host,
+      projectId: space.id,
+      runId,
+      save: journalFile(runId).save,
+      adapters: { page: pageAdapter(fake.call, space, runId, { settleMs: 0 }) },
+    }).create('page', expected);
+
+  const slow = site({ lagging: 2 });
+  assert.equal((await create(slow)).status, 'created');
+  assert.equal(slow.calls.filter((c) => c.route.startsWith('GET /wiki/api/v2/pages/')).length, 3);
+
+  // A page that never shows is still a mismatch, after a bounded number of reads.
+  const lost = site({ lagging: 100 });
+  await assert.rejects(create(lost), /Page ownership mismatch/);
+  assert.equal(lost.calls.filter((c) => c.route.startsWith('GET /wiki/api/v2/pages/')).length, 5);
 });
 
 test('cleanup refuses a page whose title or space no longer matches', async (t) => {

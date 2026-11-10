@@ -13,7 +13,7 @@ export {
   installationTargets,
   confluenceSpaceKey,
 } from './config.mjs';
-export { atlassianCredentials, jiraConfig, apiSite } from './credentials.mjs';
+export { atlassianCredentials, requireCredentials, jiraConfig, apiSite } from './credentials.mjs';
 export { safeRequest, retryRead } from './safe-request.mjs';
 export {
   browserTarget,

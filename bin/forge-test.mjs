@@ -18,6 +18,8 @@ import {
   renew,
   restore,
   secrets,
+  sessionLines,
+  sessionReport,
   suite,
 } from '../src/jira/commands.mjs';
 import * as confluence from '../src/confluence/commands.mjs';
@@ -31,6 +33,8 @@ const usage = `Usage: forge-test <command>
   preflight <host>               Inventory an owned site (read-only)
   login [profile]                Save a browser session after a manual sign-in
   renew [profile...]             Extend saved sessions without signing in (default: all)
+  sessions [profile...] [--verify] [--json]
+                                 Saved sessions' dates; --verify asks Jira whose they are (read-only)
   prepare                        Create or verify the marked fixture spaces (Jira or Confluence)
   cleanup <fixture-app> <run>    Guarded cleanup of one journaled run
   lane <lane> [--config f] [-- args]  Run a Playwright lane (features, compatibility)
@@ -74,6 +78,18 @@ try {
     case 'renew':
       process.exitCode = (await renew(args)) ? 0 : 1;
       break;
+    case 'sessions': {
+      const report = await sessionReport(
+        args.filter((arg) => !arg.startsWith('--')),
+        { verify: args.includes('--verify') },
+      );
+      console.log(
+        args.includes('--json') ? JSON.stringify(report) : sessionLines(report).join('\n'),
+      );
+      const bad = (s) => s.missing || s.expired || s.verify?.error || s.verify?.signedIn === false;
+      process.exitCode = report.sessions.some(bad) ? 1 : 0;
+      break;
+    }
     case 'prepare':
       await ((await product()) === 'confluence' ? confluence.prepare() : prepare());
       break;
@@ -86,18 +102,22 @@ try {
       const own = split < 0 ? args : args.slice(0, split);
       const configFile = option(own, '--config') ?? 'playwright.config.mjs';
       process.env.PLUGIN_PRODUCT = await product();
-      process.exitCode = await lane(own[0], split < 0 ? [] : args.slice(split + 1), { configFile });
+      const { leaseUses: uses } = await consumer();
+      process.exitCode = await lane(own[0], split < 0 ? [] : args.slice(split + 1), {
+        configFile,
+        uses,
+      });
       break;
     }
     case 'suite': {
-      const { suites = {} } = await consumer();
+      const { suites = {}, leaseUses: uses } = await consumer();
       if (!suites[args[0]])
         throw Error(`No suite ${args[0]}; forge-test.mjs defines: ${Object.keys(suites)}`);
       const only = option(args, '--only');
       const steps = selectSteps(suites[args[0]], only);
       const title = `${args[0]} suite${only ? ` (only ${only})` : ''}`;
       if (args.includes('--list')) listSuite(steps);
-      else process.exitCode = (await suite(title, steps)) ? 0 : 1;
+      else process.exitCode = (await suite(title, steps, { uses })) ? 0 : 1;
       break;
     }
     case 'lease':

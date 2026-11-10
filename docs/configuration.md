@@ -48,7 +48,7 @@ The first match wins:
 | `fixtures.projects` | Other named spaces, for example one used by a registered fixture profile |
 | `fixtures.identity` | The space whose isolated permission scheme holds the pinned identity accounts ([set up by hand](#identity-fixture)). It also holds the site lease that `forge-test suite` takes |
 | `fixtures.landing` | The work item `forge-test login` opens (required by `login`). Without `fixtures.identity`, its space holds the site lease |
-| `email`, `keychainService` | Optional. The account email (or `JIRA_EMAIL`), and on macOS a Keychain item holding the API token (or `JIRA_API_KEY`) |
+| `email`, `keychainService` | Optional. The account email (or `ATLASSIAN_EMAIL`), and a keyring item holding the API token (or `ATLASSIAN_API_TOKEN`): the macOS Keychain item with that service name, or on Linux the Secret Service item whose `service` attribute it is (`secret-tool store --label='Jira API token' service <name>`) |
 
 ### Advanced: renaming the namespace
 
@@ -65,8 +65,9 @@ If you change `namespace` while fixtures made under the old one are still on a s
 
 ## Credentials
 
-- **API:** `JIRA_EMAIL` and `JIRA_API_KEY` (a classic Atlassian API token). Without `JIRA_EMAIL`, the configuration's `email` is used, then `email` in `<state>/config.json`.
-- **Forge CLI:** `FORGE_EMAIL` and `FORGE_API_TOKEN`, defaulting to the same values.
+`ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN` (a classic Atlassian API token) name one account for every product and for the Forge CLI. No other variable is read, and `forge-test secrets` writes these two names for CI. A machine can store the values instead: the email as the configuration's `email` or as `email` in `<state>/config.json`, and the token in the keyring item named by `keychainService`. A command that finds no email or token fails naming the variable to set.
+
+The Forge CLI itself reads `FORGE_EMAIL` and `FORGE_API_TOKEN`. Don't set them: whatever starts the CLI passes it the account above under those names.
 
 Values are never printed. `prepare` needs a site administrator: it creates spaces.
 
@@ -77,7 +78,7 @@ Journeys that need pinned accounts (the `identity` profile) use one space on the
 1. Create a company-managed software space with the key in `fixtures.identity`. Set its description to exactly `<namespace> owned identity permission fixtures v1. Synthetic data only.`, with your `namespace`.
 2. Copy a permission scheme, give the copy the same description, and associate it with this space only. A journey that changes a grant first checks that no other space uses the scheme, and refuses otherwise.
 3. In that scheme, grant three distinct accounts:
-   - **owner:** the API account (`JIRA_EMAIL`), a Jira administrator who can browse, create, edit, delete and comment on work items in the space;
+   - **owner:** the API account (`ATLASSIAN_EMAIL`), a Jira administrator who can browse, create, edit, delete and comment on work items in the space;
    - **member:** can browse, edit and comment, but doesn't administer the space or Jira;
    - **restricted:** can browse and edit but not comment, and doesn't administer.
 4. Save a session for each: `npx forge-test login admin` as the owner, then `login member` and `login restricted`.

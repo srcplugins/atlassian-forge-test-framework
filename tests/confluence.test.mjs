@@ -4,6 +4,7 @@ import { runInNewContext } from 'node:vm';
 import { configure, validateConfig } from '../src/core/config.mjs';
 import {
   client,
+  tokenRequest,
   confluenceTarget,
   spacePath,
   pagePath,
@@ -16,6 +17,28 @@ const base = { namespace: 'synthetic', sites: [{ role: 'primary', host }] };
 const uuid = '0b1c2d3e-4f50-4617-8899-aabbccddeeff';
 const enable = () =>
   configure({ ...base, sites: [{ ...base.sites[0], products: ['confluence'] }] });
+
+test('a token request needs recorded Confluence access and credentials', async (t) => {
+  const saved = { email: process.env.ATLASSIAN_EMAIL, token: process.env.ATLASSIAN_API_TOKEN };
+  t.after(() => {
+    for (const [name, value] of [
+      ['ATLASSIAN_EMAIL', saved.email],
+      ['ATLASSIAN_API_TOKEN', saved.token],
+    ])
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+  });
+  delete process.env.ATLASSIAN_EMAIL;
+  delete process.env.ATLASSIAN_API_TOKEN;
+  configure(base);
+  await assert.rejects(() => tokenRequest(), /Verified owned Confluence/);
+  enable();
+  await assert.rejects(() => tokenRequest(), /Set ATLASSIAN_EMAIL and ATLASSIAN_API_TOKEN\./);
+  process.env.ATLASSIAN_EMAIL = 'tester@example.com';
+  process.env.ATLASSIAN_API_TOKEN = 'synthetic-token';
+  const request = await tokenRequest(host);
+  await request.dispose();
+});
 
 test('Confluence requires independently recorded product access and isolates private state', () => {
   configure(base);
