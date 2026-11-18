@@ -32,7 +32,11 @@ export async function openRovoChat(page, { url, agent, starter, inventory }) {
       .catch(() => {
         throw Error(`The agent gallery's search for ${agent} never answered`);
       });
-    await page.getByRole('searchbox', { name: 'Search agents', exact: true }).fill(agent);
+    // The field was a searchbox until November 2026, and is a textbox since.
+    await page
+      .getByRole('searchbox', { name: 'Search agents', exact: true })
+      .or(page.getByRole('textbox', { name: 'Search agents', exact: true }))
+      .fill(agent);
     await searched;
     const choices = page.getByRole('button', { name: `Chat with ${agent}`, exact: true });
     await expect(choices.first()).toBeVisible();
