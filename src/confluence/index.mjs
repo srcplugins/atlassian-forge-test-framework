@@ -5,6 +5,7 @@ export { test, expect, installation, spaceSettingsPage } from './features.mjs';
 export {
   confluenceCall,
   findSpace,
+  personalSpace,
   prepareSpace,
   pageAdapter,
   pageLabels,

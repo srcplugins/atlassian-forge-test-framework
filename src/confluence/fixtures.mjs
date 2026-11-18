@@ -91,6 +91,40 @@ export async function findSpace(call, app) {
 }
 
 /**
+ * The caller's own personal space, for journeys that need a personal space rather than the marked
+ * fixture space. Read-only: Confluence creates the space, so it carries no marker; ownership is
+ * that Confluence reports it as the caller's personal space and as created by the caller. Only
+ * run-marked pages (`pageAdapter`) are written there. Throws when the caller has none.
+ */
+export async function personalSpace(call) {
+  const me = await call('/wiki/rest/api/user/current?expand=personalSpace');
+  if (!ok(me.status)) throw rejection('user read', me.status);
+  const accountId = me.body?.accountId;
+  const own = me.body?.personalSpace;
+  if (typeof accountId !== 'string' || !accountId) throw Error('Unexpected user read.');
+  if (!own) throw Error('The account has no personal space.');
+  const key = String(own.key ?? '');
+  if (!/^~[a-zA-Z0-9]+$/.test(key) || own.type !== 'personal')
+    throw Error('Personal space ownership mismatch');
+  const { status, body } = await call(
+    `/wiki/api/v2/spaces?keys=${encodeURIComponent(key)}&limit=2`,
+  );
+  if (!ok(status)) throw rejection('space read', status);
+  const results = body?.results;
+  if (!Array.isArray(results) || results.length !== 1) throw Error('Unexpected space listing.');
+  const [space] = results;
+  if (
+    space.key !== key ||
+    space.type !== 'personal' ||
+    space.authorId !== accountId ||
+    !/^[1-9]\d*$/.test(String(space.id)) ||
+    String(space.id) !== String(own.id)
+  )
+    throw Error('Personal space ownership mismatch');
+  return { id: String(space.id), key };
+}
+
+/**
  * Creates once, or verifies, an app's marked Confluence fixture space as the API account. Intent
  * is journaled before the create; an unresolved earlier attempt stops it until it is inspected.
  */
@@ -183,6 +217,10 @@ export function pageAdapter(call, space, runId, { settleMs = 2000 } = {}) {
       }
       const purged = await call(`/wiki/api/v2/pages/${entry.id}?purge=true`, 'DELETE');
       if (!ok(purged.status)) throw rejection('page purge', purged.status);
+      // Confluence can still answer a read of a page just purged, so the run's independent
+      // confirmation waits up to four more reads, `settleMs` apart, for the purge to show.
+      for (let i = 0; i < 4 && (await read(entry.id)) !== null; i++)
+        await new Promise((resolve) => setTimeout(resolve, settleMs));
     },
   };
 }

@@ -12,6 +12,7 @@ import {
   confluenceTarget,
   journalFile,
   pageAdapter,
+  personalSpace,
   prepareSpace,
   restrictPage,
 } from '../src/confluence/index.mjs';
@@ -33,10 +34,12 @@ function setup(t) {
 /**
  * An in-memory Confluence holding spaces, pages, labels and read restrictions. `fail` names
  * requests ("METHOD path-prefix") whose response is lost after the change is applied; `lagging`
- * is how many reads of a new page answer 404 before it shows, as Confluence's can.
+ * is how many reads of a new page answer 404 before it shows, as Confluence's can; `lingering` is
+ * how many reads of a purged page still answer it.
  */
-function site({ fail = [], refuse = {}, lagging = 0 } = {}) {
+function site({ fail = [], refuse = {}, lagging = 0, lingering = 0, me = null } = {}) {
   const unseen = new Map();
+  const ghosts = new Map();
   const spaces = [];
   const pages = new Map();
   const calls = [];
@@ -49,8 +52,10 @@ function site({ fail = [], refuse = {}, lagging = 0 } = {}) {
       calls.push({ route, search: searchParams.toString(), data, origin: headers.Origin });
       if (refuse[route]) return json(refuse[route], {});
       let response;
-      const page = pages.get(pathname.match(/\/(?:pages|content)\/(\d+)/)?.[1]);
-      if (route === 'GET /wiki/api/v2/spaces')
+      const pageId = pathname.match(/\/(?:pages|content)\/(\d+)/)?.[1];
+      const page = pages.get(pageId);
+      if (route === 'GET /wiki/rest/api/user/current') response = json(200, me);
+      else if (route === 'GET /wiki/api/v2/spaces')
         response = json(200, {
           results: spaces.filter((s) => searchParams.get('keys') === s.key),
         });
@@ -73,11 +78,16 @@ function site({ fail = [], refuse = {}, lagging = 0 } = {}) {
       else if (/^GET \/wiki\/api\/v2\/pages\/\d+$/.test(route)) {
         const lag = unseen.get(page?.id) ?? 0;
         if (lag) unseen.set(page.id, lag - 1);
-        response = page && !lag ? json(200, page) : json(404, {});
+        const ghost = ghosts.get(pageId);
+        if (!page && ghost?.reads) {
+          ghost.reads--;
+          response = json(200, ghost.page);
+        } else response = page && !lag ? json(200, page) : json(404, {});
       } else if (/^DELETE \/wiki\/api\/v2\/pages\/\d+$/.test(route)) {
         if (!page) response = json(404, {});
         else if (searchParams.get('purge') === 'true') {
           pages.delete(page.id);
+          ghosts.set(page.id, { page, reads: lingering });
           response = json(204, null);
         } else {
           page.status = 'trashed';
@@ -146,6 +156,30 @@ test('an unresolved space creation stops until it is inspected', async (t) => {
   assert.equal(again.calls.filter((c) => c.route.startsWith('POST')).length, 0);
 });
 
+test("a personal space is the caller's own, read only, and anything else is refused", async (t) => {
+  setup(t);
+  const accountId = '712020:0b1c2d3e';
+  const own = { id: '9', key: '~7120200b1c2d3e', type: 'personal' };
+  const listed = { ...own, authorId: accountId };
+  const fake = site({ me: { accountId, personalSpace: own } });
+  fake.spaces.push(listed);
+  assert.deepEqual(await personalSpace(fake.call), { id: '9', key: own.key });
+  assert.equal(fake.calls.filter((c) => !c.route.startsWith('GET')).length, 0);
+
+  listed.authorId = '712020:someone-else';
+  await assert.rejects(personalSpace(fake.call), /ownership mismatch/);
+  listed.authorId = accountId;
+  listed.type = 'global';
+  await assert.rejects(personalSpace(fake.call), /ownership mismatch/);
+  listed.type = 'personal';
+  own.id = '10';
+  await assert.rejects(personalSpace(fake.call), /ownership mismatch/);
+  own.id = '9';
+  own.key = 'SYNTH';
+  await assert.rejects(personalSpace(fake.call), /ownership mismatch/);
+  await assert.rejects(personalSpace(site({ me: { accountId } }).call), /no personal space/);
+});
+
 test('pages are journaled, rechecked and purged; a lost create is found by its marker, never repeated', async (t) => {
   setup(t);
   const fake = site({ fail: ['POST /wiki/api/v2/pages'] });
@@ -197,6 +231,33 @@ test('a new page that reads as missing for a moment is read again before its own
   const lost = site({ lagging: 100 });
   await assert.rejects(create(lost), /Page ownership mismatch/);
   assert.equal(lost.calls.filter((c) => c.route.startsWith('GET /wiki/api/v2/pages/')).length, 5);
+});
+
+test('cleanup waits for a purge to show before its independent read, a bounded number of times', async (t) => {
+  setup(t);
+  const run = async (fake) => {
+    const space = await prepareSpace(fake.call, 'example');
+    const pages = FixtureRun.create({
+      app: 'example',
+      site: host,
+      projectId: space.id,
+      runId,
+      save: () => {},
+      adapters: { page: pageAdapter(fake.call, space, runId, { settleMs: 0 }) },
+    });
+    const marker = markers.runMarker(runId, 0);
+    await pages.create('page', { marker, title: `${marker} Synthetic page` });
+    return pages.cleanup();
+  };
+  const slow = site({ lingering: 2 });
+  await run(slow);
+  assert.equal(slow.pages.size, 0);
+  // A purge that never shows still fails the cleanup, after a bounded number of reads.
+  const stuck = site({ lingering: 100 });
+  stuck.spaces.push(...slow.spaces);
+  await assert.rejects(run(stuck), /cleanup incomplete/);
+  const reads = stuck.calls.filter((c) => c.route.startsWith('GET /wiki/api/v2/pages/'));
+  assert.ok(reads.length < 10);
 });
 
 test('cleanup refuses a page whose title or space no longer matches', async (t) => {

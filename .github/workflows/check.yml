@@ -9,6 +9,9 @@ permissions:
 
 jobs:
   check:
+    # A push checks every branch here, and its result shows on that branch's pull request, so
+    # pull_request only checks a fork's branch (which pushes nothing here).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     # The self-hosted px-0 runners while the repository is private; GitHub-hosted once it is
     # public, so code from fork pull requests never runs on them.
     runs-on: ${{ github.event.repository.private && 'px-0' || 'ubuntu-24.04' }}
